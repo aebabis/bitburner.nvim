@@ -21,6 +21,7 @@ local _state = {
   _queue      = {},  -- keyed by "filename\0server" to deduplicate
   _timer      = nil,
   _pull_timer = nil,
+  _push_times = {},  -- filename -> vim.uv.now() when pushFile was sent
 }
 
 local function next_id()
@@ -53,6 +54,7 @@ local function matches_ignore(rel_path)
 end
 
 local function do_push_file(filename, content, server)
+  _state._push_times[filename] = vim.uv.now()
   rpc('pushFile', { filename = filename, content = content, server = server }, function(result, err)
     if err then
       vim.notify('[bitburner] push failed: ' .. filename .. ': ' .. vim.inspect(err), vim.log.levels.ERROR)
@@ -120,12 +122,16 @@ end
 
 local function pull_silent()
   if not _state.conn or not _state.config.sync_root then return end
+  local requested_at = vim.uv.now()
   rpc('getAllFiles', { server = _state.config.default_server }, function(result, err)
     if err or not result then return end
     for _, file in ipairs(result) do
-      local rel_path  = file.filename:gsub('^/', '')
+      local rel_path   = file.filename:gsub('^/', '')
       local local_path = _state.config.sync_root .. '/' .. rel_path
-      if not buf_is_modified(local_path) then
+      local push_time  = _state._push_times[file.filename]
+      if push_time and push_time > requested_at then
+        -- a push was sent after this pull request; game state is not settled
+      elseif not buf_is_modified(local_path) then
         local existing = read_local_file(local_path)
         if existing ~= file.content then
           write_local_file(rel_path, file.content)
