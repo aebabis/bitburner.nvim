@@ -13,3 +13,19 @@ end, {})
 vim.api.nvim_create_user_command('BitburnerInit', function()
   require('bitburner').init()
 end, {})
+
+vim.api.nvim_create_user_command('BitburnerPull', function()
+  require('bitburner').pull()
+end, {})
+
+vim.api.nvim_create_user_command('BitburnerPullFile', function()
+  require('bitburner').pull_file()
+end, {})
+
+vim.api.nvim_create_user_command('BitburnerDiff', function()
+  require('bitburner').diff()
+end, {})
+
+vim.api.nvim_create_user_command('BitburnerSync', function()
+  require('bitburner').sync()
+end, {})

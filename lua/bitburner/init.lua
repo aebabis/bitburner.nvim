@@ -350,6 +350,213 @@ function M.init()
   end)
 end
 
+local function write_local_file(rel_path, content)
+  local path = _state.config.sync_root .. '/' .. rel_path
+  vim.fn.mkdir(vim.fn.fnamemodify(path, ':h'), 'p')
+  local f = assert(io.open(path, 'w'))
+  f:write(content)
+  f:close()
+  for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_is_loaded(buf) and vim.api.nvim_buf_get_name(buf) == path then
+      vim.api.nvim_buf_call(buf, function() vim.cmd('edit!') end)
+    end
+  end
+end
+
+local function read_local_file(path)
+  local f = io.open(path, 'r')
+  if not f then return nil end
+  local content = f:read('*a')
+  f:close()
+  return content
+end
+
+function M.pull()
+  if not _state.conn then
+    vim.notify('[bitburner] game not connected', vim.log.levels.WARN)
+    return
+  end
+  local sync_root = _state.config.sync_root
+  if not sync_root then
+    vim.notify('[bitburner] sync_root not configured', vim.log.levels.ERROR)
+    return
+  end
+
+  rpc('getAllFiles', { server = _state.config.default_server }, function(result, err)
+    if err then
+      vim.notify('[bitburner] pull failed: ' .. vim.inspect(err), vim.log.levels.ERROR)
+      return
+    end
+    local written, skipped = 0, 0
+    for _, file in ipairs(result or {}) do
+      local rel_path = file.filename:gsub('^/', '')
+      local local_path = sync_root .. '/' .. rel_path
+      local existing = read_local_file(local_path)
+      if existing ~= nil and existing ~= file.content then
+        local choice = vim.fn.confirm(rel_path .. ' differs locally. Overwrite?', '&Yes\n&No', 2)
+        if choice == 1 then
+          write_local_file(rel_path, file.content)
+          written = written + 1
+        else
+          skipped = skipped + 1
+        end
+      elseif existing == nil then
+        write_local_file(rel_path, file.content)
+        written = written + 1
+      end
+    end
+    vim.notify(string.format('[bitburner] pull: wrote %d, skipped %d', written, skipped), vim.log.levels.INFO)
+  end)
+end
+
+function M.pull_file()
+  if not _state.conn then
+    vim.notify('[bitburner] game not connected', vim.log.levels.WARN)
+    return
+  end
+  local sync_root = _state.config.sync_root
+  if not sync_root then
+    vim.notify('[bitburner] sync_root not configured', vim.log.levels.ERROR)
+    return
+  end
+
+  local buf = vim.api.nvim_get_current_buf()
+  local buf_path = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(buf), ':p')
+  if not vim.startswith(buf_path, sync_root .. '/') then
+    vim.notify('[bitburner] file is outside sync_root', vim.log.levels.WARN)
+    return
+  end
+
+  if vim.bo[buf].modified then
+    local choice = vim.fn.confirm('Buffer has unsaved changes. Overwrite?', '&Yes\n&No', 2)
+    if choice ~= 1 then return end
+  end
+
+  local rel_path = buf_path:sub(#sync_root + 2)
+  rpc('getFile', { filename = '/' .. rel_path, server = _state.config.default_server }, function(result, err)
+    if err or result == nil then
+      vim.notify('[bitburner] pull failed: file not found in game', vim.log.levels.WARN)
+      return
+    end
+    write_local_file(rel_path, result)
+    vim.notify('[bitburner] pulled /' .. rel_path, vim.log.levels.INFO)
+  end)
+end
+
+function M.diff()
+  if not _state.conn then
+    vim.notify('[bitburner] game not connected', vim.log.levels.WARN)
+    return
+  end
+  local sync_root = _state.config.sync_root
+  if not sync_root then
+    vim.notify('[bitburner] sync_root not configured', vim.log.levels.ERROR)
+    return
+  end
+
+  local source_buf = vim.api.nvim_get_current_buf()
+  local buf_path = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(source_buf), ':p')
+  if not vim.startswith(buf_path, sync_root .. '/') then
+    vim.notify('[bitburner] file is outside sync_root', vim.log.levels.WARN)
+    return
+  end
+
+  local rel_path = buf_path:sub(#sync_root + 2)
+  local filename  = '/' .. rel_path
+
+  rpc('getFile', { filename = filename, server = _state.config.default_server }, function(result, err)
+    if err or result == nil then
+      vim.notify('[bitburner] diff failed: file not found in game', vim.log.levels.WARN)
+      return
+    end
+
+    local buf_name = 'bitburner://' .. filename
+    local existing = vim.fn.bufnr(buf_name)
+    if existing ~= -1 then vim.api.nvim_buf_delete(existing, { force = true }) end
+
+    local game_lines = vim.split(result, '\n', { plain = true })
+    if game_lines[#game_lines] == '' then table.remove(game_lines) end
+
+    local game_buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_name(game_buf, buf_name)
+    vim.api.nvim_buf_set_lines(game_buf, 0, -1, false, game_lines)
+    vim.bo[game_buf].buftype    = 'nofile'
+    vim.bo[game_buf].bufhidden  = 'wipe'
+    vim.bo[game_buf].modifiable = false
+    local ft = vim.bo[source_buf].filetype
+    if ft ~= '' then vim.bo[game_buf].filetype = ft end
+
+    local local_win = vim.api.nvim_get_current_win()
+    vim.cmd('diffthis')
+    vim.cmd('vsplit')
+    vim.api.nvim_win_set_buf(vim.api.nvim_get_current_win(), game_buf)
+    vim.cmd('diffthis')
+    vim.api.nvim_set_current_win(local_win)
+  end)
+end
+
+function M.sync()
+  if not _state.conn then
+    vim.notify('[bitburner] game not connected', vim.log.levels.WARN)
+    return
+  end
+  local sync_root = _state.config.sync_root
+  if not sync_root then
+    vim.notify('[bitburner] sync_root not configured', vim.log.levels.ERROR)
+    return
+  end
+
+  rpc('getAllFiles', { server = _state.config.default_server }, function(result, err)
+    if err then
+      vim.notify('[bitburner] sync failed: ' .. vim.inspect(err), vim.log.levels.ERROR)
+      return
+    end
+
+    local game_files = {}
+    for _, file in ipairs(result or {}) do
+      game_files[file.filename:gsub('^/', '')] = file.content
+    end
+
+    local local_files = {}
+    for _, path in ipairs(vim.fn.globpath(sync_root, '**/*', false, true)) do
+      if vim.fn.isdirectory(path) == 0 then
+        local rel_path = path:sub(#sync_root + 2)
+        if not matches_ignore(rel_path) then
+          local content = read_local_file(path)
+          if content then local_files[rel_path] = content end
+        end
+      end
+    end
+
+    local pushed, pulled, conflicts = 0, 0, {}
+
+    for rel_path, content in pairs(local_files) do
+      if not game_files[rel_path] then
+        do_push_file('/' .. rel_path, content, _state.config.default_server)
+        pushed = pushed + 1
+      elseif game_files[rel_path] ~= content then
+        table.insert(conflicts, rel_path)
+      end
+    end
+
+    for rel_path, content in pairs(game_files) do
+      if not local_files[rel_path] then
+        write_local_file(rel_path, content)
+        pulled = pulled + 1
+      end
+    end
+
+    local msg = string.format('[bitburner] sync: pushed %d, pulled %d', pushed, pulled)
+    if #conflicts > 0 then
+      msg = msg .. string.format('\n%d conflict(s) — use :BitburnerDiff to resolve:', #conflicts)
+      for _, f in ipairs(conflicts) do msg = msg .. '\n  ' .. f end
+      vim.notify(msg, vim.log.levels.WARN)
+    else
+      vim.notify(msg, vim.log.levels.INFO)
+    end
+  end)
+end
+
 function M.statusline()
   if not _state.server then
     return 'BB:off'
