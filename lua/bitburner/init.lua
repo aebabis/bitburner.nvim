@@ -24,6 +24,7 @@ local _state = {
   _timer      = nil,
   _pull_timer = nil,
   _push_times = {},  -- filename -> vim.uv.now() when pushFile was sent
+  _ram_cache  = {},  -- buf_path -> formatted RAM string
 }
 
 local function next_id()
@@ -295,6 +296,33 @@ local function on_vim_enter()
   end
 end
 
+-- RAM calculation ----------------------------------------------------------
+
+local function calculate_ram_for_buf()
+  if not _state.conn then return end
+  local sync_root = _state.config.sync_root
+  if not sync_root then return end
+  local buf_path = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(0), ':p')
+  if not vim.startswith(buf_path, sync_root .. '/') then return end
+  local rel_path = buf_path:sub(#sync_root + 2)
+  if matches_ignore(rel_path) then return end
+  rpc('calculateRam', { filename = '/' .. rel_path, server = _state.config.default_server },
+    function(result, err)
+      if not err and result then
+        _state._ram_cache[buf_path] = string.format('%.2f GB', result)
+        vim.cmd('redrawstatus')
+      end
+    end)
+end
+
+local function setup_ram_autocmds()
+  local group = vim.api.nvim_create_augroup('BitburnerRam', { clear = true })
+  vim.api.nvim_create_autocmd({ 'BufEnter', 'BufWritePost' }, {
+    group    = group,
+    callback = calculate_ram_for_buf,
+  })
+end
+
 -- Public API ---------------------------------------------------------------
 
 function M.setup(opts)
@@ -304,6 +332,8 @@ function M.setup(opts)
     _state.config.sync_root = vim.fn.fnamemodify(_state.config.sync_root, ':p'):gsub('/$', '')
   end
   setup_autocmds()
+  setup_ram_autocmds()
+  vim.api.nvim_set_hl(0, 'BitburnerRam', { link = 'DiagnosticInfo', default = true })
   vim.api.nvim_create_autocmd('VimEnter', {
     group    = vim.api.nvim_create_augroup('BitburnerProjectLoad', { clear = true }),
     once     = true,
@@ -657,6 +687,13 @@ function M.sync()
       vim.notify(msg, vim.log.levels.INFO)
     end
   end)
+end
+
+function M.ram_statusline()
+  if not _state.conn then return '' end
+  local buf_path = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(0), ':p')
+  local ram = _state._ram_cache[buf_path]
+  return ram and ('(' .. ram .. ')') or ''
 end
 
 function M.statusline()
