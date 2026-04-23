@@ -120,6 +120,19 @@ local function on_message(_, raw)
   end
 end
 
+local function write_local_file(rel_path, content)
+  local path = _state.config.sync_root .. '/' .. rel_path
+  vim.fn.mkdir(vim.fn.fnamemodify(path, ':h'), 'p')
+  local f = assert(io.open(path, 'w'))
+  f:write(content)
+  f:close()
+  for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_is_loaded(buf) and vim.api.nvim_buf_get_name(buf) == path then
+      vim.api.nvim_buf_call(buf, function() vim.cmd('edit!') end)
+    end
+  end
+end
+
 local function read_local_file(path)
   local f = io.open(path, 'r')
   if not f then return nil end
@@ -490,18 +503,6 @@ function M.init()
   end)
 end
 
-local function write_local_file(rel_path, content)
-  local path = _state.config.sync_root .. '/' .. rel_path
-  vim.fn.mkdir(vim.fn.fnamemodify(path, ':h'), 'p')
-  local f = assert(io.open(path, 'w'))
-  f:write(content)
-  f:close()
-  for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-    if vim.api.nvim_buf_is_loaded(buf) and vim.api.nvim_buf_get_name(buf) == path then
-      vim.api.nvim_buf_call(buf, function() vim.cmd('edit!') end)
-    end
-  end
-end
 
 
 function M.pull()
