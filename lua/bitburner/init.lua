@@ -12,6 +12,8 @@ local _state = {
     auto_detect         = false,
     auto_pull           = false,   -- false | "poll"
     auto_pull_interval  = 5000,    -- ms
+    signal_on_push      = false,
+    signal_file         = '/bitburner-nvim.txt',
     debug               = false,
   },
   server      = nil,
@@ -58,8 +60,17 @@ local function do_push_file(filename, content, server)
   rpc('pushFile', { filename = filename, content = content, server = server }, function(result, err)
     if err then
       vim.notify('[bitburner] push failed: ' .. filename .. ': ' .. vim.inspect(err), vim.log.levels.ERROR)
-    elseif _state.config.notify_on_push then
-      vim.notify('[bitburner] pushed ' .. filename, vim.log.levels.INFO)
+    else
+      if _state.config.notify_on_push then
+        vim.notify('[bitburner] pushed ' .. filename, vim.log.levels.INFO)
+      end
+      if _state.config.signal_on_push and filename ~= _state.config.signal_file then
+        rpc('pushFile', {
+          filename = _state.config.signal_file,
+          content  = tostring(os.time()),
+          server   = server,
+        }, nil)
+      end
     end
   end)
 end
@@ -399,10 +410,17 @@ function M.init()
     end)
   end
 
+  local function ask_signal_on_push()
+    vim.ui.input({ prompt = 'signal_on_push (y/n) [n]: ' }, function(v)
+      wizard.signal_on_push = (v == 'y' or v == 'yes')
+      ask_auto_pull()
+    end)
+  end
+
   local function ask_push_all_on_connect()
     vim.ui.input({ prompt = 'push_all_on_connect (y/n) [n]: ' }, function(v)
       wizard.push_all_on_connect = (v == 'y' or v == 'yes')
-      ask_auto_pull()
+      ask_signal_on_push()
     end)
   end
 

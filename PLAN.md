@@ -110,12 +110,23 @@ verify local file matches. Then `:BitburnerDiff` on a diverged file.
 ### Phase 5 — Script execution
 **Goal**: close the loop without leaving Neovim.
 
-- [ ] Investigate whether the RPC API supports `run`/`kill` methods
-  (not documented in Remote File API — may require companion NS script)
-- [ ] `:BitburnerRun [args]` — run current file on target server
-- [ ] `:BitburnerKill` — kill current file if running
-- [ ] `restart_on_push` option — kill + rerun after successful push
-- [ ] `--server <name>` flag on push/run commands (override default_server)
+- [ ] `signal_on_push` option — after each successful push, write a Unix
+  timestamp to `signal_file` (default `/bitburner-nvim.txt`) on the game
+  server. Users poll this with `ns.read()` in a bootstrap/watcher script
+  to trigger re-initialization without the plugin needing to understand
+  their process topology.
+  - Add `signal_on_push` and `signal_file` config options ✓
+  - Add to `:BitburnerInit` wizard ✓
+- [ ] Companion NS script — required for `:BitburnerRun` / `:BitburnerKill`;
+  run/kill are not in the documented Remote File API.
+  - Design: companion script runs inside the game and executes `ns.run()`
+    / `ns.kill()` based on commands written to a known file by the plugin
+  - Companion script generator (`:BitburnerGenCompanion` or similar) that
+    writes the script to sync_root so the user can push it once — add to
+    backlog
+- [ ] `:BitburnerRun [args]` — run current file on home via companion script
+- [ ] `:BitburnerKill` — kill current file on home via companion script
+- [ ] `run_on_push` — defer until run/kill are implemented and tested
 - [ ] TypeScript compilation awareness (opt-in):
   - `ts_out_dir` config: push from compiled output dir instead of source
 
