@@ -9,3 +9,7 @@ end, {})
 vim.api.nvim_create_user_command('BitburnerPush', function()
   require('bitburner').push()
 end, {})
+
+vim.api.nvim_create_user_command('BitburnerInit', function()
+  require('bitburner').init()
+end, {})
