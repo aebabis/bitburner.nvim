@@ -374,10 +374,29 @@ function M.init()
     end)
   end
 
+  local function ask_auto_pull_interval()
+    vim.ui.input({ prompt = 'auto_pull_interval in ms [5000]: ' }, function(v)
+      wizard.auto_pull_interval = tonumber(v) or 5000
+      ask_server()
+    end)
+  end
+
+  local function ask_auto_pull()
+    vim.ui.input({ prompt = 'auto_pull (poll / none) [none]: ' }, function(v)
+      if v == 'poll' then
+        wizard.auto_pull = 'poll'
+        ask_auto_pull_interval()
+      else
+        wizard.auto_pull = false
+        ask_server()
+      end
+    end)
+  end
+
   local function ask_push_all_on_connect()
     vim.ui.input({ prompt = 'push_all_on_connect (y/n) [n]: ' }, function(v)
       wizard.push_all_on_connect = (v == 'y' or v == 'yes')
-      ask_server()
+      ask_auto_pull()
     end)
   end
 
