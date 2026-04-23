@@ -10,14 +10,17 @@ local _state = {
     notify_on_push      = false,
     push_all_on_connect = false,
     auto_detect         = false,
+    auto_pull           = false,   -- false | "poll"
+    auto_pull_interval  = 5000,    -- ms
     debug               = false,
   },
-  server   = nil,
-  conn     = nil,
-  _id      = 0,
-  _pending = {},
-  _queue   = {},  -- keyed by "filename\0server" to deduplicate
-  _timer   = nil,
+  server      = nil,
+  conn        = nil,
+  _id         = 0,
+  _pending    = {},
+  _queue      = {},  -- keyed by "filename\0server" to deduplicate
+  _timer      = nil,
+  _pull_timer = nil,
 }
 
 local function next_id()
@@ -103,6 +106,50 @@ local function on_message(_, raw)
   end
 end
 
+local function buf_is_modified(path)
+  for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_is_loaded(buf)
+      and vim.api.nvim_buf_get_name(buf) == path
+      and vim.bo[buf].modified
+    then
+      return true
+    end
+  end
+  return false
+end
+
+local function pull_silent()
+  if not _state.conn or not _state.config.sync_root then return end
+  rpc('getAllFiles', { server = _state.config.default_server }, function(result, err)
+    if err or not result then return end
+    for _, file in ipairs(result) do
+      local rel_path  = file.filename:gsub('^/', '')
+      local local_path = _state.config.sync_root .. '/' .. rel_path
+      if not buf_is_modified(local_path) then
+        local existing = read_local_file(local_path)
+        if existing ~= file.content then
+          write_local_file(rel_path, file.content)
+        end
+      end
+    end
+  end)
+end
+
+local function start_pull_timer()
+  if _state.config.auto_pull ~= 'poll' then return end
+  if not _state._pull_timer then
+    _state._pull_timer = vim.uv.new_timer()
+  end
+  local ms = _state.config.auto_pull_interval
+  _state._pull_timer:start(ms, ms, vim.schedule_wrap(pull_silent))
+end
+
+local function stop_pull_timer()
+  if _state._pull_timer then
+    _state._pull_timer:stop()
+  end
+end
+
 local function on_connect(conn)
   _state.conn = conn
   vim.notify('[bitburner] game connected', vim.log.levels.INFO)
@@ -112,11 +159,13 @@ local function on_connect(conn)
   else
     flush_queue()
   end
+  start_pull_timer()
 end
 
 local function on_close(conn)
   if _state.conn == conn then
     _state.conn = nil
+    stop_pull_timer()
     vim.notify('[bitburner] game disconnected', vim.log.levels.WARN)
   end
 end
@@ -251,6 +300,7 @@ function M.connect(port)
 end
 
 function M.disconnect()
+  stop_pull_timer()
   if _state.conn then
     _state.conn:close()
     _state.conn = nil
