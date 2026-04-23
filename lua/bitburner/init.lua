@@ -10,6 +10,7 @@ local _state = {
     notify_on_push      = false,
     push_all_on_connect = false,
     auto_detect         = false,
+    debug               = false,
   },
   server   = nil,
   conn     = nil,
@@ -83,10 +84,18 @@ local function push_all()
   end
 end
 
+local function dbg(msg)
+  if _state.config.debug then
+    vim.notify('[bitburner:debug] ' .. msg, vim.log.levels.WARN)
+  end
+end
+
 local function on_message(_, raw)
+  dbg('raw: ' .. raw)
   local ok, data = pcall(vim.json.decode, raw)
   if not ok then return end
   local id = data.id
+  dbg('id=' .. vim.inspect(id) .. ' pending=' .. vim.inspect(vim.tbl_keys(_state._pending)))
   if id and _state._pending[id] then
     local cb = _state._pending[id]
     _state._pending[id] = nil
