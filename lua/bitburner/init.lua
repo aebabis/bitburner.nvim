@@ -331,8 +331,10 @@ local function calculate_ram_for_buf()
     function(result, err)
       if not err and result then
         _state._ram_cache[buf_path] = string.format('%.2f GB', result)
-        vim.cmd('redrawstatus')
+      else
+        _state._ram_cache[buf_path] = false
       end
+      vim.cmd('redrawstatus')
     end)
 end
 
@@ -354,7 +356,8 @@ function M.setup(opts)
   end
   setup_autocmds()
   setup_ram_autocmds()
-  vim.api.nvim_set_hl(0, 'BitburnerRam', { link = 'DiagnosticInfo', default = true })
+  vim.api.nvim_set_hl(0, 'BitburnerRam',      { link = 'DiagnosticInfo',  default = true })
+  vim.api.nvim_set_hl(0, 'BitburnerRamError', { link = 'DiagnosticError', default = true })
   vim.api.nvim_create_autocmd('VimEnter', {
     group    = vim.api.nvim_create_augroup('BitburnerProjectLoad', { clear = true }),
     once     = true,
@@ -695,10 +698,14 @@ function M.ram_statusline()
   if not _state.conn then return '' end
   local buf_path = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(0), ':p')
   local ram = _state._ram_cache[buf_path]
-  return ram and ('(' .. ram .. ')') or ''
+  if ram == nil then return '' end
+  if ram == false then return '%#BitburnerRamError#(error)%*' end
+  return '%#BitburnerRam#(' .. ram .. ')%*'
 end
 
 function M.statusline()
+  local buf_path = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(0), ':p')
+  if _state._ram_cache[buf_path] == nil then return '' end
   if not _state.server then
     return 'BB:off'
   elseif _state.conn then
