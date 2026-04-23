@@ -297,12 +297,28 @@ function M.init()
     end
     vim.notify('[bitburner] wrote ' .. path, vim.log.levels.INFO)
     apply_project_config(wizard)
+    -- treat init as a connection event if the game is already connected
+    if _state.conn then
+      if _state.config.push_all_on_connect then
+        _state._queue = {}
+        push_all()
+      else
+        flush_queue()
+      end
+    end
   end
 
   local function ask_server()
     vim.ui.input({ prompt = 'default_server [home]: ' }, function(v)
       wizard.default_server = (v and v ~= '') and v or 'home'
       write_and_apply()
+    end)
+  end
+
+  local function ask_push_all_on_connect()
+    vim.ui.input({ prompt = 'push_all_on_connect (y/n) [n]: ' }, function(v)
+      wizard.push_all_on_connect = (v == 'y' or v == 'yes')
+      ask_server()
     end)
   end
 
@@ -313,7 +329,7 @@ function M.init()
       else
         wizard.auto_push = false
       end
-      ask_server()
+      ask_push_all_on_connect()
     end)
   end
 
