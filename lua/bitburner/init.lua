@@ -13,9 +13,9 @@ local _state = {
     auto_pull           = false,   -- false | "poll"
     auto_pull_interval  = 5000,    -- ms
     signal_on_push      = false,
-    signal_file         = '/bitburner-nvim.txt',
+    signal_file         = '/.bitburner/signal.txt',
     companion_tier      = 0,   -- 0=disabled, 1, 2, or 3
-    companion_file      = '/bitburner-nvim-info.json',
+    companion_file      = '/.bitburner/info.json',
     companion_poll_ms   = 2000,
     debug               = false,
   },
@@ -846,7 +846,7 @@ local function gen_companion_script(tier)
     ' * Fields for tiers above yours can be omitted or null.',
     ' */',
     '',
-    "const OUTPUT_FILE = '/bitburner-nvim-info.json';",
+    "const OUTPUT_FILE = '" .. _state.config.companion_file .. "';",
     'const INTERVAL_MS = 2000;',
     '',
     '/** @param {NS} ns */',
