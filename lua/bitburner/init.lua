@@ -216,18 +216,19 @@ local function fetch_definitions(write_jsconfig)
       return
     end
     local root = project_root()
-    local dts  = root .. '/NetscriptDefinitions.d.ts'
-    local f = io.open(dts, 'w')
+    local dir  = root .. '/.bitburner'
+    vim.fn.mkdir(dir, 'p')
+
+    local f = io.open(dir .. '/NetscriptDefinitions.d.ts', 'w')
     if not f then
-      vim.notify('[bitburner] could not write ' .. dts, vim.log.levels.ERROR)
+      vim.notify('[bitburner] could not write to ' .. dir, vim.log.levels.ERROR)
       return
     end
     f:write(result)
     f:close()
 
-    -- Make NS (and other common types) available globally so JSDoc
-    -- /** @param {NS} ns */ works without import() in every script.
-    local gf = io.open(root .. '/bitburner-globals.d.ts', 'w')
+    -- Make NS available globally so /** @param {NS} ns */ works without imports.
+    local gf = io.open(dir .. '/bitburner-globals.d.ts', 'w')
     if gf then
       gf:write('export {};\ndeclare global {\n  type NS = import(\'./NetscriptDefinitions\').NS;\n}\n')
       gf:close()
@@ -475,22 +476,26 @@ function M.init()
     vim.notify('[bitburner] wrote ' .. path, vim.log.levels.INFO)
 
     local gitignore_path = vim.fn.getcwd() .. '/.gitignore'
-    local entry = '/.bitburner.json'
-    local already = false
+    local entries = { '/.bitburner.json', '/.bitburner/' }
+    local existing = {}
     local gf = io.open(gitignore_path, 'r')
     if gf then
-      for line in gf:lines() do
-        if line == entry then already = true; break end
-      end
+      for line in gf:lines() do existing[line] = true end
       gf:close()
     end
-    if not already then
-      local af = io.open(gitignore_path, 'a')
-      if af then
-        af:write(entry .. '\n')
-        af:close()
-        vim.notify('[bitburner] added ' .. entry .. ' to .gitignore', vim.log.levels.INFO)
+    local added = {}
+    local af = io.open(gitignore_path, 'a')
+    if af then
+      for _, entry in ipairs(entries) do
+        if not existing[entry] then
+          af:write(entry .. '\n')
+          table.insert(added, entry)
+        end
       end
+      af:close()
+    end
+    if #added > 0 then
+      vim.notify('[bitburner] added to .gitignore: ' .. table.concat(added, ', '), vim.log.levels.INFO)
     end
 
     apply_project_config(wizard)
