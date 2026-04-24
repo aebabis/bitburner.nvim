@@ -4,7 +4,7 @@ local _state = {
   config = {
     port                = 12525,
     sync_root           = nil,
-    sync_ignore         = { '*.md', '*.json', 'node_modules/**' },
+    sync_ignore         = { '*.md', '*.json', 'node_modules/**', '.bitburner/**' },
     default_server      = 'home',
     auto_push           = false,   -- false | "on_save" | "on_exit_insert"
     notify_on_push      = false,
@@ -429,6 +429,8 @@ local function calculate_ram_for_buf()
   if not vim.startswith(buf_path, sync_root .. '/') then return end
   local rel_path = buf_path:sub(#sync_root + 2)
   if matches_ignore(rel_path) then return end
+  local ext = buf_path:match('%.([^.]+)$')
+  if not ({ js = true, ts = true, ns = true, script = true })[ext] then return end
   rpc('calculateRam', { filename = '/' .. rel_path, server = _state.config.default_server },
     function(result, err)
       if not err and result then
@@ -908,6 +910,42 @@ function M.gen_companion(tier)
     vim.notify('[bitburner] companion script (tier ' .. tier .. ') pushed as ' .. filename, vim.log.levels.INFO)
   else
     vim.notify('[bitburner] companion script written to ' .. sync_root .. filename .. ' (connect to push)', vim.log.levels.INFO)
+  end
+end
+
+function M.rm()
+  if not _state.conn then
+    vim.notify('[bitburner] game not connected', vim.log.levels.WARN)
+    return
+  end
+  local sync_root = _state.config.sync_root
+  if not sync_root then
+    vim.notify('[bitburner] sync_root not configured', vim.log.levels.ERROR)
+    return
+  end
+  local buf_path = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(0), ':p')
+  if not vim.startswith(buf_path, sync_root .. '/') then
+    vim.notify('[bitburner] file is outside sync_root', vim.log.levels.WARN)
+    return
+  end
+  local rel_path = buf_path:sub(#sync_root + 2)
+  local filename = '/' .. rel_path
+  local server   = _state.config.default_server
+  local choice = vim.fn.confirm(
+    'Delete ' .. filename .. ' from game and disk?',
+    '&Yes\n&Game only\n&Cancel', 3)
+  if choice == 3 or choice == 0 then return end
+  rpc('deleteFile', { filename = filename, server = server }, function(result, err)
+    if err then
+      vim.notify('[bitburner] deleteFile failed: ' .. vim.inspect(err), vim.log.levels.ERROR)
+      return
+    end
+    vim.notify('[bitburner] deleted ' .. filename .. ' from game', vim.log.levels.INFO)
+  end)
+  if choice == 1 then
+    vim.fn.delete(buf_path)
+    _state._ram_cache[buf_path] = nil
+    vim.cmd('bdelete!')
   end
 end
 
