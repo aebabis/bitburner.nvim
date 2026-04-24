@@ -33,3 +33,7 @@ end, {})
 vim.api.nvim_create_user_command('BitburnerGetDefinitions', function()
   require('bitburner').get_definitions()
 end, {})
+
+vim.api.nvim_create_user_command('BitburnerGenCompanion', function(opts)
+  require('bitburner').gen_companion(opts.args ~= '' and opts.args or nil)
+end, { nargs = '?' })

@@ -14,6 +14,9 @@ local _state = {
     auto_pull_interval  = 5000,    -- ms
     signal_on_push      = false,
     signal_file         = '/bitburner-nvim.txt',
+    companion_tier      = 0,   -- 0=disabled, 1, 2, or 3
+    companion_file      = '/bitburner-nvim-info.json',
+    companion_poll_ms   = 2000,
     debug               = false,
   },
   server      = nil,
@@ -23,8 +26,10 @@ local _state = {
   _queue      = {},  -- keyed by "filename\0server" to deduplicate
   _timer      = nil,
   _pull_timer = nil,
+  _info_timer = nil,
   _push_times = {},  -- filename -> vim.uv.now() when pushFile was sent
   _ram_cache  = {},  -- buf_path -> formatted RAM string
+  _info       = nil, -- latest parsed companion script output
 }
 
 local function next_id()
@@ -189,6 +194,33 @@ local function stop_pull_timer()
   end
 end
 
+local function start_info_timer()
+  if not _state.config.companion_tier or _state.config.companion_tier < 1 then return end
+  if not _state._info_timer then
+    _state._info_timer = vim.uv.new_timer()
+  end
+  local ms  = _state.config.companion_poll_ms
+  local file   = _state.config.companion_file
+  local server = _state.config.default_server
+  _state._info_timer:start(ms, ms, vim.schedule_wrap(function()
+    rpc('getFile', { filename = file, server = server }, function(result, err)
+      if err or not result then return end
+      local ok, data = pcall(vim.json.decode, result)
+      if ok and type(data) == 'table' and data.v == 1 then
+        _state._info = data
+        vim.cmd('redrawstatus')
+      end
+    end)
+  end))
+end
+
+local function stop_info_timer()
+  if _state._info_timer then
+    _state._info_timer:stop()
+    _state._info = nil
+  end
+end
+
 -- Project config (.bitburner.json) ----------------------------------------
 
 local function find_project_config()
@@ -260,12 +292,14 @@ local function on_connect(conn)
     flush_queue()
   end
   start_pull_timer()
+  start_info_timer()
 end
 
 local function on_close(conn)
   if _state.conn == conn then
     _state.conn = nil
     stop_pull_timer()
+    stop_info_timer()
     vim.notify('[bitburner] game disconnected', vim.log.levels.WARN)
   end
 end
@@ -328,6 +362,7 @@ local function setup_autocmds()
   vim.api.nvim_create_autocmd('VimLeavePre', {
     group    = group,
     callback = function()
+      stop_info_timer()
       if _state.conn then _state.conn:close() end
       if _state.server then _state.server:close() end
     end,
@@ -438,6 +473,7 @@ end
 
 function M.disconnect()
   stop_pull_timer()
+  stop_info_timer()
   if _state.conn then
     _state.conn:close()
     _state.conn = nil
@@ -784,6 +820,97 @@ function M.sync()
   end)
 end
 
+-- Companion script ----------------------------------------------------------
+
+local function gen_companion_script(tier)
+  local lines = {
+    '/**',
+    ' * bitburner-nvim companion script (tier ' .. tier .. ')',
+    ' *',
+    ' * Polls game state and writes it to OUTPUT_FILE so the bitburner.nvim',
+    ' * Neovim plugin can display live info in your statusline.',
+    ' *',
+    ' * You can replace this script entirely. The only contract is the output:',
+    ' * call ns.write(OUTPUT_FILE, JSON.stringify(data), "w") on a regular',
+    ' * interval, where `data` matches this shape:',
+    ' *',
+    " *   {",
+    " *     v:      1,            // schema version — must be 1",
+    " *     ts:     Date.now(),   // ms timestamp of this update",
+    " *     ram:    { max: number, used: number },                    // tier 1+",
+    " *     player: { money: number, hacking: number },               // tier 2+",
+    " *     procs:  [{ file: string, pid: number, threads: number }], // tier 2+",
+    " *     reset:  { bitnode: number, playtime: number },            // tier 3+",
+    " *   }",
+    ' *',
+    ' * Fields for tiers above yours can be omitted or null.',
+    ' */',
+    '',
+    "const OUTPUT_FILE = '/bitburner-nvim-info.json';",
+    'const INTERVAL_MS = 2000;',
+    '',
+    '/** @param {NS} ns */',
+    'export async function main(ns) {',
+    "  ns.disableLog('ALL');",
+    '  while (true) {',
+    '    const data = { v: 1, ts: Date.now() };',
+    '    data.ram = {',
+    "      max:  ns.getServerMaxRam('home'),",
+    "      used: ns.getServerUsedRam('home'),",
+    '    };',
+  }
+
+  if tier >= 2 then
+    vim.list_extend(lines, {
+      '    const p = ns.getPlayer();',
+      '    data.player = { money: p.money, hacking: p.skills.hacking };',
+      "    data.procs = ns.ps('home').map(proc => ({",
+      '      file: proc.filename, pid: proc.pid, threads: proc.threads,',
+      '    }));',
+    })
+  end
+
+  if tier >= 3 then
+    vim.list_extend(lines, {
+      '    const r = ns.getResetInfo();',
+      '    data.reset = { bitnode: r.currentNode, playtime: r.totalPlaytime };',
+    })
+  end
+
+  vim.list_extend(lines, {
+    '    ns.write(OUTPUT_FILE, JSON.stringify(data), "w");',
+    '    await ns.sleep(INTERVAL_MS);',
+    '  }',
+    '}',
+    '',
+  })
+
+  return table.concat(lines, '\n')
+end
+
+function M.gen_companion(tier)
+  tier = tonumber(tier) or _state.config.companion_tier
+  if not tier or tier < 1 or tier > 3 then
+    vim.notify('[bitburner] companion_tier must be 1, 2, or 3', vim.log.levels.ERROR)
+    return
+  end
+  local sync_root = _state.config.sync_root
+  if not sync_root then
+    vim.notify('[bitburner] sync_root not configured', vim.log.levels.ERROR)
+    return
+  end
+  local content  = gen_companion_script(tier)
+  local filename = '/bitburner-nvim.js'
+  local f = io.open(sync_root .. filename, 'w')
+  if f then f:write(content); f:close() end
+  if _state.conn then
+    do_push_file(filename, content, _state.config.default_server)
+    vim.notify('[bitburner] companion script (tier ' .. tier .. ') pushed as ' .. filename, vim.log.levels.INFO)
+  else
+    vim.notify('[bitburner] companion script written to ' .. sync_root .. filename .. ' (connect to push)', vim.log.levels.INFO)
+  end
+end
+
 function M.get_definitions()
   if not _state.conn then
     vim.notify('[bitburner] game not connected', vim.log.levels.WARN)
@@ -801,17 +928,40 @@ function M.ram_statusline()
   return '%#BitburnerRam#(' .. ram .. ')%*'
 end
 
+local function fmt_money(n)
+  if     n >= 1e12 then return string.format('$%.2ft', n / 1e12)
+  elseif n >= 1e9  then return string.format('$%.2fb', n / 1e9)
+  elseif n >= 1e6  then return string.format('$%.2fm', n / 1e6)
+  elseif n >= 1e3  then return string.format('$%.2fk', n / 1e3)
+  else                   return string.format('$%.0f',  n)
+  end
+end
+
 function M.statusline()
   local buf_path = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(0), ':p')
   if _state._ram_cache[buf_path] == nil then return '' end
   if not _state.server then
     return 'BB:off'
-  elseif _state.conn then
-    return 'BB:connected'
-  else
+  elseif not _state.conn then
     local n = vim.tbl_count(_state._queue)
     return n > 0 and ('BB:waiting[' .. n .. ']') or 'BB:waiting'
   end
+
+  local parts = { 'BB:connected' }
+  local info  = _state._info
+  if info then
+    if info.ram then
+      parts[#parts+1] = string.format('home:%.0f/%.0fGB', info.ram.used, info.ram.max)
+    end
+    if info.player then
+      parts[#parts+1] = fmt_money(info.player.money)
+      parts[#parts+1] = 'hk:' .. info.player.hacking
+    end
+    if info.reset then
+      parts[#parts+1] = 'BN' .. info.reset.bitnode
+    end
+  end
+  return table.concat(parts, ' | ')
 end
 
 return M
