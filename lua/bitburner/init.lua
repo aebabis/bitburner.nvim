@@ -473,6 +473,26 @@ function M.init()
       return
     end
     vim.notify('[bitburner] wrote ' .. path, vim.log.levels.INFO)
+
+    local gitignore_path = vim.fn.getcwd() .. '/.gitignore'
+    local entry = '/.bitburner.json'
+    local already = false
+    local gf = io.open(gitignore_path, 'r')
+    if gf then
+      for line in gf:lines() do
+        if line == entry then already = true; break end
+      end
+      gf:close()
+    end
+    if not already then
+      local af = io.open(gitignore_path, 'a')
+      if af then
+        af:write(entry .. '\n')
+        af:close()
+        vim.notify('[bitburner] added ' .. entry .. ' to .gitignore', vim.log.levels.INFO)
+      end
+    end
+
     apply_project_config(wizard)
     -- treat init as a connection event if the game is already connected
     if _state.conn then
