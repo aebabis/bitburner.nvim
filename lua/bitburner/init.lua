@@ -271,7 +271,17 @@ local function on_close(conn)
 end
 
 local function on_error(err)
-  vim.notify('[bitburner] websocket error: ' .. tostring(err), vim.log.levels.ERROR)
+  local msg = '[bitburner] websocket error: ' .. tostring(err)
+  if tostring(err):find('bind failed') then
+    local port = _state.config.port
+    local pids = vim.fn.systemlist('ss -Htlnp sport = :' .. port .. " 2>/dev/null | grep -oP 'pid=\\K[0-9]+'")
+    if #pids > 0 then
+      msg = msg .. ' (PID ' .. table.concat(pids, ',') .. ' is using the port — kill it or run :BitburnerConnect)'
+    else
+      msg = msg .. ' (another process may be using port ' .. port .. ')'
+    end
+  end
+  vim.notify(msg, vim.log.levels.ERROR)
 end
 
 local function start_server(port)
@@ -314,6 +324,14 @@ local function setup_autocmds()
       end,
     })
   end
+
+  vim.api.nvim_create_autocmd('VimLeavePre', {
+    group    = group,
+    callback = function()
+      if _state.conn then _state.conn:close() end
+      if _state.server then _state.server:close() end
+    end,
+  })
 end
 
 local function load_project_config(path)
