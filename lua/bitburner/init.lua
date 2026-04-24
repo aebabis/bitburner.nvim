@@ -312,6 +312,7 @@ local function on_vim_enter()
   if config_path then
     local data = load_project_config(config_path)
     if data then apply_project_config(data) end
+    start_server(_state.config.port)
   elseif _state.config.auto_detect and detect_project() then
     vim.notify('[bitburner] Bitburner project detected. Run :BitburnerInit to configure.', vim.log.levels.INFO)
   end
@@ -363,7 +364,6 @@ function M.setup(opts)
     once     = true,
     callback = on_vim_enter,
   })
-  start_server(_state.config.port)
 end
 
 function M.connect(port)
