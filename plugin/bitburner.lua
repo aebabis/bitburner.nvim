@@ -29,3 +29,7 @@ end, {})
 vim.api.nvim_create_user_command('BitburnerSync', function()
   require('bitburner').sync()
 end, {})
+
+vim.api.nvim_create_user_command('BitburnerGetDefinitions', function()
+  require('bitburner').get_definitions()
+end, {})

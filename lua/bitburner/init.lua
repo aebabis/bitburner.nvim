@@ -189,6 +189,66 @@ local function stop_pull_timer()
   end
 end
 
+-- Project config (.bitburner.json) ----------------------------------------
+
+local function find_project_config()
+  local dir = vim.fn.getcwd()
+  while true do
+    local path = dir .. '/.bitburner.json'
+    if vim.fn.filereadable(path) == 1 then return path end
+    local parent = vim.fn.fnamemodify(dir, ':h')
+    if parent == dir then return nil end
+    dir = parent
+  end
+end
+
+-- TypeScript/JS definitions ------------------------------------------------
+
+local function project_root()
+  local cfg = find_project_config()
+  return cfg and vim.fn.fnamemodify(cfg, ':h') or vim.fn.getcwd()
+end
+
+local function fetch_definitions(write_jsconfig)
+  rpc('getDefinitionFile', {}, function(result, err)
+    if err or not result then
+      vim.notify('[bitburner] getDefinitionFile failed: ' .. tostring(err), vim.log.levels.WARN)
+      return
+    end
+    local root = project_root()
+    local dts  = root .. '/NetscriptDefinitions.d.ts'
+    local f = io.open(dts, 'w')
+    if not f then
+      vim.notify('[bitburner] could not write ' .. dts, vim.log.levels.ERROR)
+      return
+    end
+    f:write(result)
+    f:close()
+
+    -- Make NS (and other common types) available globally so JSDoc
+    -- /** @param {NS} ns */ works without import() in every script.
+    local gf = io.open(root .. '/bitburner-globals.d.ts', 'w')
+    if gf then
+      gf:write('export {};\ndeclare global {\n  type NS = import(\'./NetscriptDefinitions\').NS;\n}\n')
+      gf:close()
+    end
+
+    if write_jsconfig then
+      local jsconfig = root .. '/jsconfig.json'
+      if vim.fn.filereadable(jsconfig) == 0 then
+        local jf = io.open(jsconfig, 'w')
+        if jf then
+          jf:write(vim.json.encode({
+            compilerOptions = { target = 'ES2022', lib = { 'ES2022' }, checkJs = false },
+          }) .. '\n')
+          jf:close()
+          vim.notify('[bitburner] wrote jsconfig.json — restart your LSP to pick up NS types', vim.log.levels.INFO)
+        end
+      end
+    end
+  end)
+end
+
 local function on_connect(conn)
   _state.conn = conn
   vim.notify('[bitburner] game connected', vim.log.levels.INFO)
@@ -252,19 +312,6 @@ local function setup_autocmds()
         end))
       end,
     })
-  end
-end
-
--- Project config (.bitburner.json) ----------------------------------------
-
-local function find_project_config()
-  local dir = vim.fn.getcwd()
-  while true do
-    local path = dir .. '/.bitburner.json'
-    if vim.fn.filereadable(path) == 1 then return path end
-    local parent = vim.fn.fnamemodify(dir, ':h')
-    if parent == dir then return nil end
-    dir = parent
   end
 end
 
@@ -692,6 +739,14 @@ function M.sync()
       vim.notify(msg, vim.log.levels.INFO)
     end
   end)
+end
+
+function M.get_definitions()
+  if not _state.conn then
+    vim.notify('[bitburner] game not connected', vim.log.levels.WARN)
+    return
+  end
+  fetch_definitions(true)
 end
 
 function M.ram_statusline()

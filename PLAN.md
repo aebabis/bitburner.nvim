@@ -127,8 +127,7 @@ verify local file matches. Then `:BitburnerDiff` on a diverged file.
 - [ ] `:BitburnerRun [args]` — run current file on home via companion script
 - [ ] `:BitburnerKill` — kill current file on home via companion script
 - [ ] `run_on_push` — defer until run/kill are implemented and tested
-- [ ] TypeScript compilation awareness (opt-in):
-  - `ts_out_dir` config: push from compiled output dir instead of source
+- [ ] TypeScript compilation awareness — deferred to Horizon phase (see below)
 
 **TEST CHECKPOINT**: `:BitburnerRun`, verify script appears in game's process
 list. `:BitburnerKill`, verify it's gone. Enable `restart_on_push`, save file,
@@ -152,3 +151,23 @@ verify running script restarts.
 
 **TEST CHECKPOINT**: run a RAM-heavy script to reduce available RAM, verify
 diagnostic appears on a script that would exceed the limit.
+
+---
+
+### Horizon — TypeScript project support
+**Goal**: first-class TypeScript workflow. Write `.ts`, compile, push compiled `.js`.
+
+The game only runs JavaScript; TypeScript must be compiled locally before pushing.
+This requires rethinking the source↔game file mapping across push, pull, and sync.
+
+- [ ] `ts_out_dir` config: directory where `tsc` writes compiled output
+  - Push reads from `ts_out_dir` instead of the source `.ts` file
+  - Game filename derived from output path (`.ts` → `.js`)
+- [ ] Source map awareness: pull/diff resolves game `.js` back to source `.ts`
+- [ ] `:BitburnerGetDefinitions` — call `getDefinitionFile` RPC, write
+  `NetscriptDefinitions.d.ts` to project root; re-fetch on each connect
+- [ ] Document recommended `tsconfig.json` setup in README
+- [ ] Warn if `ts_out_dir` file is stale relative to its `.ts` source (mtime check)
+
+**Design constraint**: push/pull/sync must remain correct for pure-JS projects.
+TypeScript support is strictly opt-in via `ts_out_dir`.
