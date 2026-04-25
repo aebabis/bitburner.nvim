@@ -4,7 +4,7 @@ local _state = {
   config = {
     port                = 12525,
     sync_root           = nil,
-    sync_ignore         = { '*.md', '*.json', 'node_modules/**', '.bitburner/**' },
+    sync_ignore         = { '*.md', '*.json', 'node_modules/**' },
     default_server      = 'home',
     auto_push           = false,   -- false | "on_save" | "on_exit_insert"
     notify_on_push      = false,
@@ -53,6 +53,7 @@ local function rpc(method, params, callback)
 end
 
 local function matches_ignore(rel_path)
+  if vim.startswith(rel_path, '.bitburner/') then return true end
   for _, pattern in ipairs(_state.config.sync_ignore) do
     if vim.fn.match(rel_path, vim.fn.glob2regpat(pattern)) >= 0 then
       return true
