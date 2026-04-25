@@ -166,14 +166,16 @@ local function pull_silent()
     if err or not result then return end
     for _, file in ipairs(result) do
       local rel_path   = file.filename:gsub('^/', '')
-      local local_path = _state.config.sync_root .. '/' .. rel_path
-      local push_time  = _state._push_times[file.filename]
-      if push_time and push_time > requested_at then
-        -- a push was sent after this pull request; game state is not settled
-      elseif not buf_is_modified(local_path) then
-        local existing = read_local_file(local_path)
-        if existing ~= file.content then
-          write_local_file(rel_path, file.content)
+      if not matches_ignore(rel_path) then
+        local local_path = _state.config.sync_root .. '/' .. rel_path
+        local push_time  = _state._push_times[file.filename]
+        if push_time and push_time > requested_at then
+          -- a push was sent after this pull request; game state is not settled
+        elseif not buf_is_modified(local_path) then
+          local existing = read_local_file(local_path)
+          if existing ~= file.content then
+            write_local_file(rel_path, file.content)
+          end
         end
       end
     end
@@ -656,19 +658,21 @@ function M.pull()
     local written, skipped = 0, 0
     for _, file in ipairs(result or {}) do
       local rel_path = file.filename:gsub('^/', '')
-      local local_path = sync_root .. '/' .. rel_path
-      local existing = read_local_file(local_path)
-      if existing ~= nil and existing ~= file.content then
-        local choice = vim.fn.confirm(rel_path .. ' differs locally. Overwrite?', '&Yes\n&No', 2)
-        if choice == 1 then
+      if not matches_ignore(rel_path) then
+        local local_path = sync_root .. '/' .. rel_path
+        local existing = read_local_file(local_path)
+        if existing ~= nil and existing ~= file.content then
+          local choice = vim.fn.confirm(rel_path .. ' differs locally. Overwrite?', '&Yes\n&No', 2)
+          if choice == 1 then
+            write_local_file(rel_path, file.content)
+            written = written + 1
+          else
+            skipped = skipped + 1
+          end
+        elseif existing == nil then
           write_local_file(rel_path, file.content)
           written = written + 1
-        else
-          skipped = skipped + 1
         end
-      elseif existing == nil then
-        write_local_file(rel_path, file.content)
-        written = written + 1
       end
     end
     vim.notify(string.format('[bitburner] pull: wrote %d, skipped %d', written, skipped), vim.log.levels.INFO)
@@ -806,7 +810,7 @@ function M.sync()
     end
 
     for rel_path, content in pairs(game_files) do
-      if not local_files[rel_path] then
+      if not local_files[rel_path] and not matches_ignore(rel_path) then
         write_local_file(rel_path, content)
         pulled = pulled + 1
       end
