@@ -271,15 +271,37 @@ local function fetch_definitions(write_jsconfig)
 
     if write_jsconfig then
       local jsconfig = root .. '/jsconfig.json'
-      if vim.fn.filereadable(jsconfig) == 0 then
-        local jf = io.open(jsconfig, 'w')
-        if jf then
-          jf:write(vim.json.encode({
-            compilerOptions = { target = 'ES2022', lib = { 'ES2022' }, checkJs = false },
-          }) .. '\n')
-          jf:close()
-          vim.notify('[bitburner] wrote jsconfig.json — restart your LSP to pick up NS types', vim.log.levels.INFO)
+      local config = { compilerOptions = { target = 'ES2022', lib = { 'ES2022' }, checkJs = false } }
+
+      local ef = io.open(jsconfig, 'r')
+      if ef then
+        local ok, parsed = pcall(vim.json.decode, ef:read('*a'))
+        ef:close()
+        if ok and type(parsed) == 'table' then
+          config = parsed
+          config.compilerOptions = vim.tbl_deep_extend('keep', config.compilerOptions or {}, {
+            target = 'ES2022', lib = { 'ES2022' }, checkJs = false,
+          })
         end
+      end
+
+      -- TypeScript doesn't auto-include hidden directories; be explicit.
+      -- If include wasn't set before, the default was "**/*" — preserve that.
+      local include = config.include or {}
+      local has_bb, has_glob = false, false
+      for _, v in ipairs(include) do
+        if v == '.bitburner/**/*.d.ts' then has_bb = true end
+        if v == '**/*' then has_glob = true end
+      end
+      if not has_bb then table.insert(include, 1, '.bitburner/**/*.d.ts') end
+      if not has_glob then table.insert(include, '**/*') end
+      config.include = include
+
+      local wf = io.open(jsconfig, 'w')
+      if wf then
+        wf:write(vim.json.encode(config) .. '\n')
+        wf:close()
+        vim.notify('[bitburner] updated jsconfig.json — restart your LSP to pick up NS types', vim.log.levels.INFO)
       end
     end
   end)
@@ -655,13 +677,18 @@ function M.pull()
       vim.notify('[bitburner] pull failed: ' .. vim.inspect(err), vim.log.levels.ERROR)
       return
     end
+    local files = result or {}
+    dbg('pull: got ' .. #files .. ' files from game')
     local written, skipped = 0, 0
-    for _, file in ipairs(result or {}) do
+    for _, file in ipairs(files) do
       local rel_path = file.filename:gsub('^/', '')
-      if not matches_ignore(rel_path) then
+      if matches_ignore(rel_path) then
+        dbg('pull: ignoring ' .. rel_path)
+      else
         local local_path = sync_root .. '/' .. rel_path
         local existing = read_local_file(local_path)
         if existing ~= nil and existing ~= file.content then
+          dbg('pull: ' .. rel_path .. ' differs, prompting')
           local choice = vim.fn.confirm(rel_path .. ' differs locally. Overwrite?', '&Yes\n&No', 2)
           if choice == 1 then
             write_local_file(rel_path, file.content)
@@ -670,8 +697,11 @@ function M.pull()
             skipped = skipped + 1
           end
         elseif existing == nil then
+          dbg('pull: writing new file ' .. rel_path)
           write_local_file(rel_path, file.content)
           written = written + 1
+        else
+          dbg('pull: ' .. rel_path .. ' already in sync')
         end
       end
     end
