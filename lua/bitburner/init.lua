@@ -307,6 +307,8 @@ local function fetch_definitions(write_jsconfig)
   end)
 end
 
+local calculate_ram_for_buf
+
 local function on_connect(conn)
   _state.conn = conn
   vim.notify('[bitburner] game connected', vim.log.levels.INFO)
@@ -318,6 +320,7 @@ local function on_connect(conn)
   end
   start_pull_timer()
   start_info_timer()
+  calculate_ram_for_buf()
 end
 
 local function on_close(conn)
@@ -446,7 +449,7 @@ end
 
 -- RAM calculation ----------------------------------------------------------
 
-local function calculate_ram_for_buf()
+calculate_ram_for_buf = function()
   if not _state.conn then return end
   local sync_root = _state.config.sync_root
   if not sync_root then return end
