@@ -30,6 +30,7 @@ local _state = {
   _push_times = {},  -- filename -> vim.uv.now() when pushFile was sent
   _ram_cache  = {},  -- buf_path -> formatted RAM string
   _info       = nil, -- latest parsed companion script output
+  _last_game  = {},  -- game filename -> content last written from game to disk
 }
 
 local function next_id()
@@ -173,8 +174,18 @@ local function pull_silent()
           -- a push was sent after this pull request; game state is not settled
         elseif not buf_is_modified(local_path) then
           local existing = read_local_file(local_path)
-          if existing ~= file.content then
+          if existing == nil then
             write_local_file(rel_path, file.content)
+            _state._last_game[file.filename] = file.content
+          elseif existing ~= file.content then
+            local last_game = _state._last_game[file.filename]
+            if last_game ~= nil and existing == last_game then
+              -- local still matches last game version; safe to update
+              write_local_file(rel_path, file.content)
+              _state._last_game[file.filename] = file.content
+            else
+              dbg('pull_silent: skipping ' .. rel_path .. ' (locally modified since last pull)')
+            end
           end
         end
       end
@@ -695,6 +706,7 @@ function M.pull()
           local choice = vim.fn.confirm(rel_path .. ' differs locally. Overwrite?', '&Yes\n&No', 2)
           if choice == 1 then
             write_local_file(rel_path, file.content)
+            _state._last_game[file.filename] = file.content
             written = written + 1
           else
             skipped = skipped + 1
@@ -702,6 +714,7 @@ function M.pull()
         elseif existing == nil then
           dbg('pull: writing new file ' .. rel_path)
           write_local_file(rel_path, file.content)
+          _state._last_game[file.filename] = file.content
           written = written + 1
         else
           dbg('pull: ' .. rel_path .. ' already in sync')
