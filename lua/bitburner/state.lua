@@ -31,6 +31,8 @@ return {
   _ram_cache      = {},  -- buf_path -> formatted RAM string | false
   _info           = nil, -- latest parsed companion script output
   _last_game      = {},  -- game filename -> content last written from game to disk
-  _file_push_time = {},  -- local buf_path -> os.time() when push succeeded
-  _file_pull_time = {},  -- local buf_path -> os.time() when file was written locally
+  _file_push_time  = {},  -- local buf_path -> os.time() when push succeeded
+  _file_pull_time  = {},  -- local buf_path -> os.time() when file was written locally
+  _disk_poll_timer = nil,
+  _disk_mtimes     = {},  -- local path -> mtime_ms at last disk poll
 }

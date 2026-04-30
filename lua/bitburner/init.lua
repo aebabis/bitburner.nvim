@@ -230,6 +230,7 @@ end
 function M.disconnect()
   srv.stop_pull_timer()
   srv.stop_info_timer()
+  srv.stop_disk_poll()
   if state.conn then
     state.conn:close()
     state.conn = nil
