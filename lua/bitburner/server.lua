@@ -1,5 +1,6 @@
 local state   = require('bitburner.state')
 local rpc_mod = require('bitburner.rpc')
+local fs      = require('bitburner.fs')
 local sync    = require('bitburner.sync')
 
 local M = {}
