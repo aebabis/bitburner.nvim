@@ -1,251 +1,19 @@
 local M = {}
 
-local _state = {
-  config = {
-    port                = 12525,
-    sync_root           = nil,
-    sync_ignore         = { '*.md', '*.json', 'node_modules/**' },
-    default_server      = 'home',
-    auto_push           = false,   -- false | "on_save" | "on_exit_insert"
-    notify_on_push      = false,
-    push_all_on_connect = false,
-    auto_detect         = false,
-    auto_pull           = false,   -- false | "poll"
-    auto_pull_interval  = 5000,    -- ms
-    run_on_push         = false,  -- false | "/script.js" to run after every push
-    restart_if_running  = false,  -- also kill+restart the pushed script if running
-    cmd_file            = '/.bitburner/cmd.json',
-    companion_tier      = 0,   -- 0=disabled, 1, 2, or 3
-    companion_file      = '/.bitburner/info.json',
-    companion_poll_ms   = 2000,
-    debug               = false,
-  },
-  server      = nil,
-  conn        = nil,
-  _id         = 0,
-  _pending    = {},
-  _queue      = {},  -- keyed by "filename\0server" to deduplicate
-  _timer      = nil,
-  _pull_timer = nil,
-  _info_timer = nil,
-  _push_times = {},  -- filename -> vim.uv.now() when pushFile was sent
-  _cmd_id     = 0,
-  _ram_cache  = {},  -- buf_path -> formatted RAM string
-  _info       = nil, -- latest parsed companion script output
-  _last_game  = {},  -- game filename -> content last written from game to disk
-}
+local state   = require('bitburner.state')
+local rpc_mod = require('bitburner.rpc')
+local fs      = require('bitburner.fs')
+local sync    = require('bitburner.sync')
+local srv     = require('bitburner.server')
 
-local function next_id()
-  _state._id = _state._id + 1
-  return _state._id
-end
-
-local function rpc(method, params, callback)
-  if not _state.conn then
-    if callback then callback(nil, 'not connected') end
-    return
-  end
-  local id = next_id()
-  _state._pending[id] = callback or function() end
-  _state.conn:send(vim.json.encode({
-    jsonrpc = '2.0',
-    id      = id,
-    method  = method,
-    params  = params or {},
-  }))
-end
-
-local function matches_ignore(rel_path)
-  if vim.startswith(rel_path, '.bitburner/') then return true end
-  for _, pattern in ipairs(_state.config.sync_ignore) do
-    if vim.fn.match(rel_path, vim.fn.glob2regpat(pattern)) >= 0 then
-      return true
-    end
-  end
-  return false
-end
-
-local function do_push_file(filename, content, server, skip_cmd)
-  _state._push_times[filename] = vim.uv.now()
-  rpc('pushFile', { filename = filename, content = content, server = server }, function(result, err)
-    if err then
-      vim.notify('[bitburner] push failed: ' .. filename .. ': ' .. vim.inspect(err), vim.log.levels.ERROR)
-    else
-      if _state.config.notify_on_push then
-        vim.notify('[bitburner] pushed ' .. filename, vim.log.levels.INFO)
-      end
-      local cfg = _state.config
-      if not skip_cmd and (cfg.run_on_push or cfg.restart_if_running) and filename ~= cfg.cmd_file then
-        _state._cmd_id = _state._cmd_id + 1
-        local cmd = { id = _state._cmd_id }
-        if cfg.restart_if_running then
-          cmd.restart_if_running = true
-          cmd.pushed = filename
-        end
-        if cfg.run_on_push then
-          cmd.run = cfg.run_on_push
-        end
-        rpc('pushFile', { filename = cfg.cmd_file, content = vim.json.encode(cmd), server = server }, nil)
-      end
-    end
-  end)
-end
-
-local function flush_queue()
-  local queue = _state._queue
-  _state._queue = {}
-  for _, item in pairs(queue) do
-    do_push_file(item.filename, item.content, item.server, true)
-  end
-end
-
-local function push_all()
-  local sync_root = _state.config.sync_root
-  if not sync_root then return end
-  local paths = vim.fn.globpath(sync_root, '**/*', false, true)
-  for _, path in ipairs(paths) do
-    if vim.fn.isdirectory(path) == 0 then
-      local rel_path = path:sub(#sync_root + 2)
-      if not matches_ignore(rel_path) then
-        local ok, lines = pcall(vim.fn.readfile, path)
-        if ok then
-          do_push_file('/' .. rel_path, table.concat(lines, '\n'), _state.config.default_server, true)
-        end
-      end
-    end
-  end
-end
-
-local function dbg(msg)
-  if _state.config.debug then
-    vim.notify('[bitburner:debug] ' .. msg, vim.log.levels.WARN)
-  end
-end
-
-local function on_message(_, raw)
-  dbg('raw: ' .. raw)
-  local ok, data = pcall(vim.json.decode, raw)
-  if not ok then return end
-  local id = data.id
-  dbg('id=' .. vim.inspect(id) .. ' pending=' .. vim.inspect(vim.tbl_keys(_state._pending)))
-  if id and _state._pending[id] then
-    local cb = _state._pending[id]
-    _state._pending[id] = nil
-    cb(data.result, data.error)
-  end
-end
-
-local function write_local_file(rel_path, content)
-  local path = _state.config.sync_root .. '/' .. rel_path
-  vim.fn.mkdir(vim.fn.fnamemodify(path, ':h'), 'p')
-  local f = io.open(path, 'w')
-  if not f then
-    vim.notify('[bitburner] could not write ' .. path, vim.log.levels.ERROR)
-    return
-  end
-  f:write(content)
-  f:close()
-  for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-    if vim.api.nvim_buf_is_loaded(buf) and vim.api.nvim_buf_get_name(buf) == path then
-      vim.api.nvim_buf_call(buf, function() vim.cmd('edit!') end)
-    end
-  end
-end
-
-local function read_local_file(path)
-  local f = io.open(path, 'r')
-  if not f then return nil end
-  local content = f:read('*a')
-  f:close()
-  return content
-end
-
-local function buf_is_modified(path)
-  for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-    if vim.api.nvim_buf_is_loaded(buf)
-      and vim.api.nvim_buf_get_name(buf) == path
-      and vim.bo[buf].modified
-    then
-      return true
-    end
-  end
-  return false
-end
-
-local function pull_silent()
-  if not _state.conn or not _state.config.sync_root then return end
-  local requested_at = vim.uv.now()
-  rpc('getAllFiles', { server = _state.config.default_server }, function(result, err)
-    if err or not result then return end
-    for _, file in ipairs(result) do
-      local rel_path   = file.filename:gsub('^/', '')
-      if not matches_ignore(rel_path) then
-        local local_path = _state.config.sync_root .. '/' .. rel_path
-        local push_time  = _state._push_times[file.filename]
-        if push_time and push_time > requested_at then
-          -- a push was sent after this pull request; game state is not settled
-        elseif not buf_is_modified(local_path) then
-          local existing = read_local_file(local_path)
-          if existing == nil then
-            write_local_file(rel_path, file.content)
-            _state._last_game[file.filename] = file.content
-          elseif existing ~= file.content then
-            local last_game = _state._last_game[file.filename]
-            if last_game ~= nil and existing == last_game then
-              -- local still matches last game version; safe to update
-              write_local_file(rel_path, file.content)
-              _state._last_game[file.filename] = file.content
-            else
-              dbg('pull_silent: skipping ' .. rel_path .. ' (locally modified since last pull)')
-            end
-          end
-        end
-      end
-    end
-  end)
-end
-
-local function start_pull_timer()
-  if _state.config.auto_pull ~= 'poll' then return end
-  if not _state._pull_timer then
-    _state._pull_timer = vim.uv.new_timer()
-  end
-  local ms = _state.config.auto_pull_interval
-  _state._pull_timer:start(ms, ms, vim.schedule_wrap(pull_silent))
-end
-
-local function stop_pull_timer()
-  if _state._pull_timer then
-    _state._pull_timer:stop()
-  end
-end
-
-local function start_info_timer()
-  if not _state.config.companion_tier or _state.config.companion_tier < 1 then return end
-  if not _state._info_timer then
-    _state._info_timer = vim.uv.new_timer()
-  end
-  local ms  = _state.config.companion_poll_ms
-  local file   = _state.config.companion_file
-  local server = _state.config.default_server
-  _state._info_timer:start(ms, ms, vim.schedule_wrap(function()
-    rpc('getFile', { filename = file, server = server }, function(result, err)
-      if err or not result then return end
-      local ok, data = pcall(vim.json.decode, result)
-      if ok and type(data) == 'table' and data.v == 1 then
-        _state._info = data
-        vim.cmd('redrawstatus')
-      end
-    end)
-  end))
-end
-
-local function stop_info_timer()
-  if _state._info_timer then
-    _state._info_timer:stop()
-    _state._info = nil
-  end
-end
+-- Delegate sync commands to sync module
+M.push        = sync.push
+M.pull        = sync.pull
+M.pull_file   = sync.pull_file
+M.diff        = sync.diff
+M.sync        = sync.sync
+M.rm          = sync.rm
+M.gen_companion = sync.gen_companion
 
 -- Project config (.bitburner.json) ----------------------------------------
 
@@ -260,15 +28,15 @@ local function find_project_config()
   end
 end
 
--- TypeScript/JS definitions ------------------------------------------------
-
 local function project_root()
   local cfg = find_project_config()
   return cfg and vim.fn.fnamemodify(cfg, ':h') or vim.fn.getcwd()
 end
 
+-- TypeScript/JS definitions ------------------------------------------------
+
 local function fetch_definitions(write_jsconfig)
-  rpc('getDefinitionFile', {}, function(result, err)
+  rpc_mod.rpc('getDefinitionFile', {}, function(result, err)
     if err or not result then
       vim.notify('[bitburner] getDefinitionFile failed: ' .. tostring(err), vim.log.levels.WARN)
       return
@@ -330,90 +98,27 @@ local function fetch_definitions(write_jsconfig)
   end)
 end
 
-local calculate_ram_for_buf
-
-local function on_connect(conn)
-  _state.conn = conn
-  vim.notify('[bitburner] game connected', vim.log.levels.INFO)
-  if _state.config.push_all_on_connect then
-    _state._queue = {}
-    push_all()
-  else
-    flush_queue()
-  end
-  start_pull_timer()
-  start_info_timer()
-  calculate_ram_for_buf()
-end
-
-local function flush_pending(err)
-  for _, cb in pairs(_state._pending) do
-    pcall(cb, nil, err)
-  end
-  _state._pending = {}
-end
-
-local function on_close(conn)
-  if _state.conn == conn then
-    _state.conn = nil
-    flush_pending('disconnected')
-    stop_pull_timer()
-    stop_info_timer()
-    vim.notify('[bitburner] game disconnected', vim.log.levels.WARN)
-  end
-end
-
-local function on_error(err)
-  local msg = '[bitburner] websocket error: ' .. tostring(err)
-  if tostring(err):find('bind failed') then
-    local port = _state.config.port
-    local pids = vim.fn.systemlist('ss -Htlnp sport = :' .. port .. " 2>/dev/null | grep -oP 'pid=\\K[0-9]+'")
-    if #pids > 0 then
-      msg = msg .. ' (PID ' .. table.concat(pids, ',') .. ' is using the port — kill it or run :BitburnerConnect)'
-    else
-      msg = msg .. ' (another process may be using port ' .. port .. ')'
-    end
-  end
-  vim.notify(msg, vim.log.levels.ERROR)
-end
-
-local function start_server(port)
-  if _state.server then
-    _state.server:close()
-    _state.server = nil
-    _state.conn   = nil
-    flush_pending('server restarted')
-  end
-  _state.config.port = port
-  _state.server = require('websocket').listen(port, {
-    host       = '0.0.0.0',
-    on_connect = on_connect,
-    on_message = on_message,
-    on_close   = on_close,
-    on_error   = on_error,
-  })
-  vim.notify('[bitburner] listening on port ' .. port, vim.log.levels.INFO)
-end
+-- Setup & config -----------------------------------------------------------
 
 local function setup_autocmds()
   local group = vim.api.nvim_create_augroup('BitburnerAutoPush', { clear = true })
-  local auto_push = _state.config.auto_push
+  local auto_push = state.config.auto_push
 
   if auto_push == 'on_save' then
     vim.api.nvim_create_autocmd('BufWritePost', {
       group    = group,
-      callback = function() M.push() end,
+      callback = function() sync.push() end,
     })
   elseif auto_push == 'on_exit_insert' then
-    if not _state._timer then
-      _state._timer = vim.uv.new_timer()
+    if not state._timer then
+      state._timer = vim.uv.new_timer()
     end
     vim.api.nvim_create_autocmd('InsertLeave', {
       group    = group,
       callback = function()
-        _state._timer:stop()
-        _state._timer:start(500, 0, vim.schedule_wrap(function()
-          M.push()
+        state._timer:stop()
+        state._timer:start(500, 0, vim.schedule_wrap(function()
+          sync.push()
         end))
       end,
     })
@@ -422,9 +127,9 @@ local function setup_autocmds()
   vim.api.nvim_create_autocmd('VimLeavePre', {
     group    = group,
     callback = function()
-      stop_info_timer()
-      if _state.conn then _state.conn:close() end
-      if _state.server then _state.server:close() end
+      srv.stop_info_timer()
+      if state.conn   then state.conn:close() end
+      if state.server then state.server:close() end
     end,
   })
 end
@@ -446,11 +151,11 @@ local function load_project_config(path)
 end
 
 local function apply_project_config(data)
-  local old_port = _state.config.port
-  _state.config = vim.tbl_deep_extend('force', _state.config, data)
+  local old_port = state.config.port
+  state.config = vim.tbl_deep_extend('force', state.config, data)
   setup_autocmds()
-  if _state.config.port ~= old_port then
-    start_server(_state.config.port)
+  if state.config.port ~= old_port then
+    srv.start_server(state.config.port)
   end
 end
 
@@ -473,42 +178,29 @@ local function on_vim_enter()
   if config_path then
     local data = load_project_config(config_path)
     if data then apply_project_config(data) end
-    if not _state.server then
-      start_server(_state.config.port)
+    if not state.server then
+      srv.start_server(state.config.port)
     end
-  elseif _state.config.auto_detect and detect_project() then
+  elseif state.config.auto_detect and detect_project() then
     vim.notify('[bitburner] Bitburner project detected. Run :BitburnerInit to configure.', vim.log.levels.INFO)
   end
 end
 
--- RAM calculation ----------------------------------------------------------
+-- RAM statusline -----------------------------------------------------------
 
-calculate_ram_for_buf = function()
-  if not _state.conn then return end
-  local sync_root = _state.config.sync_root
-  if not sync_root then return end
-  local buf_path = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(0), ':p')
-  if not vim.startswith(buf_path, sync_root .. '/') then return end
-  local rel_path = buf_path:sub(#sync_root + 2)
-  if matches_ignore(rel_path) then return end
-  local ext = buf_path:match('%.([^.]+)$')
-  if not ({ js = true, ts = true, ns = true, script = true })[ext] then return end
-  rpc('calculateRam', { filename = '/' .. rel_path, server = _state.config.default_server },
-    function(result, err)
-      if not err and result then
-        _state._ram_cache[buf_path] = string.format('%.2f GB', result)
-      else
-        _state._ram_cache[buf_path] = false
-      end
-      vim.cmd('redrawstatus')
-    end)
+local function rel_time(t)
+  if not t then return nil end
+  local diff = os.time() - t
+  if diff < 60    then return diff .. 's' end
+  if diff < 3600  then return math.floor(diff / 60) .. 'm' end
+  return math.floor(diff / 3600) .. 'h'
 end
 
 local function setup_ram_autocmds()
   local group = vim.api.nvim_create_augroup('BitburnerRam', { clear = true })
   vim.api.nvim_create_autocmd({ 'BufEnter', 'BufWritePost' }, {
     group    = group,
-    callback = calculate_ram_for_buf,
+    callback = sync.calculate_ram_for_buf,
   })
 end
 
@@ -516,9 +208,9 @@ end
 
 function M.setup(opts)
   opts = opts or {}
-  _state.config = vim.tbl_deep_extend('force', _state.config, opts)
-  if _state.config.sync_root then
-    _state.config.sync_root = vim.fn.fnamemodify(_state.config.sync_root, ':p'):gsub('/$', '')
+  state.config = vim.tbl_deep_extend('force', state.config, opts)
+  if state.config.sync_root then
+    state.config.sync_root = vim.fn.fnamemodify(state.config.sync_root, ':p'):gsub('/$', '')
   end
   setup_autocmds()
   setup_ram_autocmds()
@@ -532,48 +224,21 @@ function M.setup(opts)
 end
 
 function M.connect(port)
-  start_server(port and tonumber(port) or _state.config.port)
+  srv.start_server(port and tonumber(port) or state.config.port)
 end
 
 function M.disconnect()
-  stop_pull_timer()
-  stop_info_timer()
-  if _state.conn then
-    _state.conn:close()
-    _state.conn = nil
+  srv.stop_pull_timer()
+  srv.stop_info_timer()
+  if state.conn then
+    state.conn:close()
+    state.conn = nil
   end
-  if _state.server then
-    _state.server:close()
-    _state.server = nil
+  if state.server then
+    state.server:close()
+    state.server = nil
   end
   vim.notify('[bitburner] server stopped', vim.log.levels.INFO)
-end
-
-function M.push()
-  local sync_root = _state.config.sync_root
-  if not sync_root then
-    vim.notify('[bitburner] sync_root not configured', vim.log.levels.ERROR)
-    return
-  end
-
-  local buf_path = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(0), ':p')
-  if buf_path == '' then return end
-  if not vim.startswith(buf_path, sync_root .. '/') then return end
-
-  local rel_path = buf_path:sub(#sync_root + 2)
-  if matches_ignore(rel_path) then return end
-
-  local content  = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), '\n')
-  local filename = '/' .. rel_path
-  local server   = _state.config.default_server
-
-  if not _state.conn then
-    _state._queue[filename .. '\0' .. server] = { filename = filename, content = content, server = server }
-    vim.notify('[bitburner] queued ' .. filename .. ' (not connected)', vim.log.levels.INFO)
-    return
-  end
-
-  do_push_file(filename, content, server)
 end
 
 function M.init()
@@ -618,12 +283,12 @@ function M.init()
 
     apply_project_config(wizard)
     -- treat init as a connection event if the game is already connected
-    if _state.conn then
-      if _state.config.push_all_on_connect then
-        _state._queue = {}
-        push_all()
+    if state.conn then
+      if state.config.push_all_on_connect then
+        state._queue = {}
+        sync.push_all()
       else
-        flush_queue()
+        sync.flush_queue()
       end
     end
   end
@@ -703,390 +368,8 @@ function M.init()
   end)
 end
 
-
-
-function M.pull()
-  if not _state.conn then
-    vim.notify('[bitburner] game not connected', vim.log.levels.WARN)
-    return
-  end
-  local sync_root = _state.config.sync_root
-  if not sync_root then
-    vim.notify('[bitburner] sync_root not configured', vim.log.levels.ERROR)
-    return
-  end
-
-  rpc('getAllFiles', { server = _state.config.default_server }, function(result, err)
-    if err then
-      vim.notify('[bitburner] pull failed: ' .. vim.inspect(err), vim.log.levels.ERROR)
-      return
-    end
-    local files = result or {}
-    dbg('pull: got ' .. #files .. ' files from game')
-    local written, skipped = 0, 0
-    for _, file in ipairs(files) do
-      local rel_path = file.filename:gsub('^/', '')
-      if matches_ignore(rel_path) then
-        dbg('pull: ignoring ' .. rel_path)
-      else
-        local local_path = sync_root .. '/' .. rel_path
-        local existing = read_local_file(local_path)
-        if existing ~= nil and existing ~= file.content then
-          dbg('pull: ' .. rel_path .. ' differs, prompting')
-          local choice = vim.fn.confirm(rel_path .. ' differs locally. Overwrite?', '&Yes\n&No', 2)
-          if choice == 1 then
-            write_local_file(rel_path, file.content)
-            _state._last_game[file.filename] = file.content
-            written = written + 1
-          else
-            skipped = skipped + 1
-          end
-        elseif existing == nil then
-          dbg('pull: writing new file ' .. rel_path)
-          write_local_file(rel_path, file.content)
-          _state._last_game[file.filename] = file.content
-          written = written + 1
-        else
-          dbg('pull: ' .. rel_path .. ' already in sync')
-        end
-      end
-    end
-    vim.notify(string.format('[bitburner] pull: wrote %d, skipped %d', written, skipped), vim.log.levels.INFO)
-  end)
-end
-
-function M.pull_file()
-  if not _state.conn then
-    vim.notify('[bitburner] game not connected', vim.log.levels.WARN)
-    return
-  end
-  local sync_root = _state.config.sync_root
-  if not sync_root then
-    vim.notify('[bitburner] sync_root not configured', vim.log.levels.ERROR)
-    return
-  end
-
-  local buf = vim.api.nvim_get_current_buf()
-  local buf_path = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(buf), ':p')
-  if not vim.startswith(buf_path, sync_root .. '/') then
-    vim.notify('[bitburner] file is outside sync_root', vim.log.levels.WARN)
-    return
-  end
-
-  if vim.bo[buf].modified then
-    local choice = vim.fn.confirm('Buffer has unsaved changes. Overwrite?', '&Yes\n&No', 2)
-    if choice ~= 1 then return end
-  end
-
-  local rel_path = buf_path:sub(#sync_root + 2)
-  rpc('getFile', { filename = '/' .. rel_path, server = _state.config.default_server }, function(result, err)
-    if err or result == nil then
-      vim.notify('[bitburner] pull failed: file not found in game', vim.log.levels.WARN)
-      return
-    end
-    write_local_file(rel_path, result)
-    _state._last_game['/' .. rel_path] = result
-    vim.notify('[bitburner] pulled /' .. rel_path, vim.log.levels.INFO)
-  end)
-end
-
-function M.diff()
-  if not _state.conn then
-    vim.notify('[bitburner] game not connected', vim.log.levels.WARN)
-    return
-  end
-  local sync_root = _state.config.sync_root
-  if not sync_root then
-    vim.notify('[bitburner] sync_root not configured', vim.log.levels.ERROR)
-    return
-  end
-
-  local source_buf = vim.api.nvim_get_current_buf()
-  local buf_path = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(source_buf), ':p')
-  if not vim.startswith(buf_path, sync_root .. '/') then
-    vim.notify('[bitburner] file is outside sync_root', vim.log.levels.WARN)
-    return
-  end
-
-  local rel_path = buf_path:sub(#sync_root + 2)
-  local filename  = '/' .. rel_path
-
-  rpc('getFile', { filename = filename, server = _state.config.default_server }, function(result, err)
-    if err or result == nil then
-      vim.notify('[bitburner] diff failed: file not found in game', vim.log.levels.WARN)
-      return
-    end
-
-    local buf_name = 'bitburner://' .. filename
-    local existing = vim.fn.bufnr(buf_name)
-    if existing ~= -1 then vim.api.nvim_buf_delete(existing, { force = true }) end
-
-    local game_lines = vim.split(result, '\n', { plain = true })
-    if game_lines[#game_lines] == '' then table.remove(game_lines) end
-
-    local game_buf = vim.api.nvim_create_buf(false, true)
-    vim.api.nvim_buf_set_name(game_buf, buf_name)
-    vim.api.nvim_buf_set_lines(game_buf, 0, -1, false, game_lines)
-    vim.bo[game_buf].buftype    = 'nofile'
-    vim.bo[game_buf].bufhidden  = 'wipe'
-    vim.bo[game_buf].modifiable = false
-    local ft = vim.bo[source_buf].filetype
-    if ft ~= '' then vim.bo[game_buf].filetype = ft end
-
-    local local_win = vim.api.nvim_get_current_win()
-    vim.cmd('diffthis')
-    vim.cmd('vsplit')
-    vim.api.nvim_win_set_buf(vim.api.nvim_get_current_win(), game_buf)
-    vim.cmd('diffthis')
-    vim.api.nvim_set_current_win(local_win)
-  end)
-end
-
-function M.sync()
-  if not _state.conn then
-    vim.notify('[bitburner] game not connected', vim.log.levels.WARN)
-    return
-  end
-  local sync_root = _state.config.sync_root
-  if not sync_root then
-    vim.notify('[bitburner] sync_root not configured', vim.log.levels.ERROR)
-    return
-  end
-
-  rpc('getAllFiles', { server = _state.config.default_server }, function(result, err)
-    if err then
-      vim.notify('[bitburner] sync failed: ' .. vim.inspect(err), vim.log.levels.ERROR)
-      return
-    end
-
-    local game_files = {}
-    for _, file in ipairs(result or {}) do
-      game_files[file.filename:gsub('^/', '')] = file.content
-    end
-
-    local local_files = {}
-    for _, path in ipairs(vim.fn.globpath(sync_root, '**/*', false, true)) do
-      if vim.fn.isdirectory(path) == 0 then
-        local rel_path = path:sub(#sync_root + 2)
-        if not matches_ignore(rel_path) then
-          local content = read_local_file(path)
-          if content then local_files[rel_path] = content end
-        end
-      end
-    end
-
-    local pushed, pulled, conflicts = 0, 0, {}
-
-    for rel_path, content in pairs(local_files) do
-      if not game_files[rel_path] then
-        do_push_file('/' .. rel_path, content, _state.config.default_server)
-        pushed = pushed + 1
-      elseif game_files[rel_path] ~= content then
-        table.insert(conflicts, rel_path)
-      end
-    end
-
-    for rel_path, content in pairs(game_files) do
-      if not local_files[rel_path] and not matches_ignore(rel_path) then
-        write_local_file(rel_path, content)
-        _state._last_game['/' .. rel_path] = content
-        pulled = pulled + 1
-      end
-    end
-
-    local msg = string.format('[bitburner] sync: pushed %d, pulled %d', pushed, pulled)
-    if #conflicts > 0 then
-      msg = msg .. string.format('\n%d conflict(s) — use :BitburnerDiff to resolve:', #conflicts)
-      for _, f in ipairs(conflicts) do msg = msg .. '\n  ' .. f end
-      vim.notify(msg, vim.log.levels.WARN)
-    else
-      vim.notify(msg, vim.log.levels.INFO)
-    end
-  end)
-end
-
--- Companion script ----------------------------------------------------------
-
-local function gen_companion_script(tier)
-  local has_cmd = _state.config.run_on_push or _state.config.restart_if_running
-  local lines = {
-    '/**',
-    ' * bitburner-nvim companion script (tier ' .. tier .. ')',
-    ' *',
-    ' * Polls game state and writes it to OUTPUT_FILE so the bitburner.nvim',
-    ' * plugin can display live info in your statusline.',
-    ' *',
-    ' * OUTPUT CONTRACT — call ns.write(OUTPUT_FILE, JSON.stringify(data), "w")',
-    ' * on a regular interval where `data` matches this shape:',
-    ' *',
-    " *   {",
-    " *     v:           1,            // schema version — must be 1",
-    " *     ts:          Date.now(),",
-    " *     ram:         { max: number, used: number },",
-    " *     player:      { money: number, hacking: number },  // tier 2+",
-    " *     procs:       [{ file, pid, threads }],            // tier 2+",
-    " *     reset:       { bitnode, playtime },               // tier 3+",
-    " *     status:      string,        // optional — shown verbatim in statusline",
-    " *     last_cmd_id: number,        // ack for last command received",
-    " *   }",
-    ' *',
-    ' * You can replace this script entirely as long as you honour the contract.',
-    ' * Customise `formatStatus` below to change what appears in Neovim.',
-    ' */',
-    '',
-    "const OUTPUT_FILE = '" .. _state.config.companion_file .. "';",
-    "const CMD_FILE    = '" .. _state.config.cmd_file .. "';",
-    'const INTERVAL_MS = ' .. _state.config.companion_poll_ms .. ';',
-    '',
-  }
-
-  if tier >= 2 then
-    vim.list_extend(lines, {
-      '/** Return the string shown in the Neovim statusline. */',
-      'function formatStatus(data) {',
-      "  const ram = `home:${Math.round(data.ram.used)}/${Math.round(data.ram.max)}GB`;",
-      '  const money = formatMoney(data.player.money);',
-      '  const hk = `hk:${data.player.hacking}`;',
-      "  return [ram, money, hk].join(' | ');",
-      '}',
-      '',
-      'function formatMoney(n) {',
-      "  if (n >= 1e12) return `$${(n/1e12).toFixed(2)}t`;",
-      "  if (n >= 1e9)  return `$${(n/1e9).toFixed(2)}b`;",
-      "  if (n >= 1e6)  return `$${(n/1e6).toFixed(2)}m`;",
-      "  if (n >= 1e3)  return `$${(n/1e3).toFixed(2)}k`;",
-      "  return `$${Math.round(n)}`;",
-      '}',
-      '',
-    })
-  end
-
-  vim.list_extend(lines, {
-    '/** @param {NS} ns */',
-    'export async function main(ns) {',
-    "  ns.disableLog('ALL');",
-    '  let lastCmdId = -1;',
-    '  while (true) {',
-    '    const data = { v: 1, ts: Date.now() };',
-    '    data.ram = {',
-    "      max:  ns.getServerMaxRam('home'),",
-    "      used: ns.getServerUsedRam('home'),",
-    '    };',
-  })
-
-  if tier >= 2 then
-    vim.list_extend(lines, {
-      '    const p = ns.getPlayer();',
-      '    data.player = { money: p.money, hacking: p.skills.hacking };',
-      "    data.procs = ns.ps('home').map(proc => ({",
-      '      file: proc.filename, pid: proc.pid, threads: proc.threads, args: proc.args,',
-      '    }));',
-      '    data.status = formatStatus(data);',
-    })
-  end
-
-  if tier >= 3 then
-    vim.list_extend(lines, {
-      '    const r = ns.getResetInfo();',
-      '    data.reset = { bitnode: r.currentNode, playtime: r.totalPlaytime };',
-    })
-  end
-
-  if has_cmd then
-    vim.list_extend(lines, {
-      '    const cmdRaw = ns.read(CMD_FILE);',
-      '    if (cmdRaw) {',
-      '      try {',
-      '        const cmd = JSON.parse(cmdRaw);',
-      '        if (cmd.id !== lastCmdId) {',
-      '          lastCmdId = cmd.id;',
-      '          if (cmd.restart_if_running && cmd.pushed) {',
-      "            const procs = ns.ps('home').filter(p => p.filename === cmd.pushed);",
-      '            for (const proc of procs) {',
-      '              ns.kill(proc.pid);',
-      '              ns.run(cmd.pushed, proc.threads, ...proc.args);',
-      '            }',
-      '          }',
-      '          if (cmd.run) ns.run(cmd.run);',
-      '        }',
-      '      } catch {}',
-      '    }',
-    })
-  end
-
-  vim.list_extend(lines, {
-    '    data.last_cmd_id = lastCmdId;',
-    '    ns.write(OUTPUT_FILE, JSON.stringify(data), "w");',
-    '    await ns.sleep(INTERVAL_MS);',
-    '  }',
-    '}',
-    '',
-  })
-
-  return table.concat(lines, '\n')
-end
-
-function M.gen_companion(tier)
-  tier = tonumber(tier) or _state.config.companion_tier
-  if not tier or tier < 1 or tier > 3 then
-    vim.notify('[bitburner] companion_tier must be 1, 2, or 3', vim.log.levels.ERROR)
-    return
-  end
-  local sync_root = _state.config.sync_root
-  if not sync_root then
-    vim.notify('[bitburner] sync_root not configured', vim.log.levels.ERROR)
-    return
-  end
-  local content  = gen_companion_script(tier)
-  local filename = '/bitburner-nvim.js'
-  local f = io.open(sync_root .. filename, 'w')
-  if f then f:write(content); f:close() end
-  if _state.conn then
-    do_push_file(filename, content, _state.config.default_server)
-    vim.notify('[bitburner] companion script (tier ' .. tier .. ') pushed as ' .. filename, vim.log.levels.INFO)
-  else
-    vim.notify('[bitburner] companion script written to ' .. sync_root .. filename .. ' (connect to push)', vim.log.levels.INFO)
-  end
-end
-
-function M.rm()
-  if not _state.conn then
-    vim.notify('[bitburner] game not connected', vim.log.levels.WARN)
-    return
-  end
-  local sync_root = _state.config.sync_root
-  if not sync_root then
-    vim.notify('[bitburner] sync_root not configured', vim.log.levels.ERROR)
-    return
-  end
-  local buf_path = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(0), ':p')
-  if not vim.startswith(buf_path, sync_root .. '/') then
-    vim.notify('[bitburner] file is outside sync_root', vim.log.levels.WARN)
-    return
-  end
-  local rel_path = buf_path:sub(#sync_root + 2)
-  local filename = '/' .. rel_path
-  local server   = _state.config.default_server
-  local choice = vim.fn.confirm(
-    'Delete ' .. filename .. ' from game and disk?',
-    '&Yes\n&Game only\n&Cancel', 3)
-  if choice == 3 or choice == 0 then return end
-  rpc('deleteFile', { filename = filename, server = server }, function(result, err)
-    if err then
-      vim.notify('[bitburner] deleteFile failed: ' .. vim.inspect(err), vim.log.levels.ERROR)
-      return
-    end
-    vim.notify('[bitburner] deleted ' .. filename .. ' from game', vim.log.levels.INFO)
-    if choice == 1 then
-      vim.fn.delete(buf_path)
-      _state._ram_cache[buf_path] = nil
-      vim.cmd('bdelete!')
-    end
-  end)
-end
-
 function M.get_definitions()
-  if not _state.conn then
+  if not state.conn then
     vim.notify('[bitburner] game not connected', vim.log.levels.WARN)
     return
   end
@@ -1094,12 +377,26 @@ function M.get_definitions()
 end
 
 function M.ram_statusline()
-  if not _state.conn then return '' end
+  if not state.conn then return '' end
   local buf_path = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(0), ':p')
-  local ram = _state._ram_cache[buf_path]
+  local ram = state._ram_cache[buf_path]
   if ram == nil then return '' end
-  if ram == false then return '%#BitburnerRamError#(error)%*' end
-  return '%#BitburnerRam#(' .. ram .. ')%*'
+
+  local push_t = rel_time(state._file_push_time[buf_path])
+  local pull_t = rel_time(state._file_pull_time[buf_path])
+
+  local inner, hl
+  if ram == false then
+    inner = 'error'
+    hl    = 'BitburnerRamError'
+  else
+    inner = ram
+    if push_t then inner = inner .. ' ↑' .. push_t end
+    if pull_t then inner = inner .. ' ↓' .. pull_t end
+    hl = 'BitburnerRam'
+  end
+
+  return '%#' .. hl .. '#(' .. inner .. ')%*'
 end
 
 local function fmt_money(n)
@@ -1113,15 +410,15 @@ end
 
 function M.statusline()
   local buf_path = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(0), ':p')
-  if _state._ram_cache[buf_path] == nil then return '' end
-  if not _state.server then
+  if state._ram_cache[buf_path] == nil then return '' end
+  if not state.server then
     return 'BB:off'
-  elseif not _state.conn then
-    local n = vim.tbl_count(_state._queue)
+  elseif not state.conn then
+    local n = vim.tbl_count(state._queue)
     return n > 0 and ('BB:waiting[' .. n .. ']') or 'BB:waiting'
   end
 
-  local info = _state._info
+  local info = state._info
   if info then
     if info.status then
       return 'BB:connected | ' .. info.status
