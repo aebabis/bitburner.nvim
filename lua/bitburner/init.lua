@@ -12,8 +12,9 @@ local _state = {
     auto_detect         = false,
     auto_pull           = false,   -- false | "poll"
     auto_pull_interval  = 5000,    -- ms
-    signal_on_push      = false,
-    signal_file         = '/.bitburner/signal.txt',
+    run_on_push         = false,  -- false | "/script.js" to run after every push
+    restart_if_running  = false,  -- also kill+restart the pushed script if running
+    cmd_file            = '/.bitburner/cmd.json',
     companion_tier      = 0,   -- 0=disabled, 1, 2, or 3
     companion_file      = '/.bitburner/info.json',
     companion_poll_ms   = 2000,
@@ -28,6 +29,7 @@ local _state = {
   _pull_timer = nil,
   _info_timer = nil,
   _push_times = {},  -- filename -> vim.uv.now() when pushFile was sent
+  _cmd_id     = 0,
   _ram_cache  = {},  -- buf_path -> formatted RAM string
   _info       = nil, -- latest parsed companion script output
   _last_game  = {},  -- game filename -> content last written from game to disk
@@ -72,12 +74,18 @@ local function do_push_file(filename, content, server)
       if _state.config.notify_on_push then
         vim.notify('[bitburner] pushed ' .. filename, vim.log.levels.INFO)
       end
-      if _state.config.signal_on_push and filename ~= _state.config.signal_file then
-        rpc('pushFile', {
-          filename = _state.config.signal_file,
-          content  = tostring(os.time()),
-          server   = server,
-        }, nil)
+      local cfg = _state.config
+      if (cfg.run_on_push or cfg.restart_if_running) and filename ~= cfg.cmd_file then
+        _state._cmd_id = _state._cmd_id + 1
+        local cmd = { id = _state._cmd_id }
+        if cfg.restart_if_running then
+          cmd.restart_if_running = true
+          cmd.pushed = filename
+        end
+        if cfg.run_on_push then
+          cmd.run = cfg.run_on_push
+        end
+        rpc('pushFile', { filename = cfg.cmd_file, content = vim.json.encode(cmd), server = server }, nil)
       end
     end
   end)
@@ -631,17 +639,24 @@ function M.init()
     end)
   end
 
-  local function ask_signal_on_push()
-    vim.ui.input({ prompt = 'signal_on_push (y/n) [n]: ' }, function(v)
-      wizard.signal_on_push = (v == 'y' or v == 'yes')
+  local function ask_restart_if_running()
+    vim.ui.input({ prompt = 'restart_if_running (y/n) [n]: ' }, function(v)
+      wizard.restart_if_running = (v == 'y' or v == 'yes')
       ask_auto_pull()
+    end)
+  end
+
+  local function ask_run_on_push()
+    vim.ui.input({ prompt = 'run_on_push script path (blank to disable): ' }, function(v)
+      wizard.run_on_push = (v ~= nil and v ~= '') and v or false
+      ask_restart_if_running()
     end)
   end
 
   local function ask_push_all_on_connect()
     vim.ui.input({ prompt = 'push_all_on_connect (y/n) [n]: ' }, function(v)
       wizard.push_all_on_connect = (v == 'y' or v == 'yes')
-      ask_signal_on_push()
+      ask_run_on_push()
     end)
   end
 
@@ -876,50 +891,80 @@ end
 -- Companion script ----------------------------------------------------------
 
 local function gen_companion_script(tier)
+  local has_cmd = _state.config.run_on_push or _state.config.restart_if_running
   local lines = {
     '/**',
     ' * bitburner-nvim companion script (tier ' .. tier .. ')',
     ' *',
     ' * Polls game state and writes it to OUTPUT_FILE so the bitburner.nvim',
-    ' * Neovim plugin can display live info in your statusline.',
+    ' * plugin can display live info in your statusline.',
     ' *',
-    ' * You can replace this script entirely. The only contract is the output:',
-    ' * call ns.write(OUTPUT_FILE, JSON.stringify(data), "w") on a regular',
-    ' * interval, where `data` matches this shape:',
+    ' * OUTPUT CONTRACT — call ns.write(OUTPUT_FILE, JSON.stringify(data), "w")',
+    ' * on a regular interval where `data` matches this shape:',
     ' *',
     " *   {",
-    " *     v:      1,            // schema version — must be 1",
-    " *     ts:     Date.now(),   // ms timestamp of this update",
-    " *     ram:    { max: number, used: number },                    // tier 1+",
-    " *     player: { money: number, hacking: number },               // tier 2+",
-    " *     procs:  [{ file: string, pid: number, threads: number }], // tier 2+",
-    " *     reset:  { bitnode: number, playtime: number },            // tier 3+",
+    " *     v:           1,            // schema version — must be 1",
+    " *     ts:          Date.now(),",
+    " *     ram:         { max: number, used: number },",
+    " *     player:      { money: number, hacking: number },  // tier 2+",
+    " *     procs:       [{ file, pid, threads }],            // tier 2+",
+    " *     reset:       { bitnode, playtime },               // tier 3+",
+    " *     status:      string,        // optional — shown verbatim in statusline",
+    " *     last_cmd_id: number,        // ack for last command received",
     " *   }",
     ' *',
-    ' * Fields for tiers above yours can be omitted or null.',
+    ' * You can replace this script entirely as long as you honour the contract.',
+    ' * Customise `formatStatus` below to change what appears in Neovim.',
     ' */',
     '',
     "const OUTPUT_FILE = '" .. _state.config.companion_file .. "';",
-    'const INTERVAL_MS = 2000;',
+    "const CMD_FILE    = '" .. _state.config.cmd_file .. "';",
+    'const INTERVAL_MS = ' .. _state.config.companion_poll_ms .. ';',
     '',
+  }
+
+  if tier >= 2 then
+    vim.list_extend(lines, {
+      '/** Return the string shown in the Neovim statusline. */',
+      'function formatStatus(data) {',
+      "  const ram = `home:${Math.round(data.ram.used)}/${Math.round(data.ram.max)}GB`;",
+      '  const money = formatMoney(data.player.money);',
+      '  const hk = `hk:${data.player.hacking}`;',
+      "  return [ram, money, hk].join(' | ');",
+      '}',
+      '',
+      'function formatMoney(n) {',
+      "  if (n >= 1e12) return `$${(n/1e12).toFixed(2)}t`;",
+      "  if (n >= 1e9)  return `$${(n/1e9).toFixed(2)}b`;",
+      "  if (n >= 1e6)  return `$${(n/1e6).toFixed(2)}m`;",
+      "  if (n >= 1e3)  return `$${(n/1e3).toFixed(2)}k`;",
+      "  return `$${Math.round(n)}`;",
+      '}',
+      '',
+    })
+  end
+
+  vim.list_extend(lines, {
     '/** @param {NS} ns */',
     'export async function main(ns) {',
     "  ns.disableLog('ALL');",
+    '  let lastCmdId = -1;',
     '  while (true) {',
     '    const data = { v: 1, ts: Date.now() };',
     '    data.ram = {',
     "      max:  ns.getServerMaxRam('home'),",
     "      used: ns.getServerUsedRam('home'),",
     '    };',
-  }
+  })
 
   if tier >= 2 then
     vim.list_extend(lines, {
       '    const p = ns.getPlayer();',
       '    data.player = { money: p.money, hacking: p.skills.hacking };',
       "    data.procs = ns.ps('home').map(proc => ({",
-      '      file: proc.filename, pid: proc.pid, threads: proc.threads,',
+      '      file: proc.filename, pid: proc.pid, threads: proc.threads, args: proc.args,',
       '    }));',
+      '    data.status = formatStatus(data);',
     })
   end
 
@@ -930,7 +975,30 @@ local function gen_companion_script(tier)
     })
   end
 
+  if has_cmd then
+    vim.list_extend(lines, {
+      '    const cmdRaw = ns.read(CMD_FILE);',
+      '    if (cmdRaw) {',
+      '      try {',
+      '        const cmd = JSON.parse(cmdRaw);',
+      '        if (cmd.id !== lastCmdId) {',
+      '          lastCmdId = cmd.id;',
+      '          if (cmd.restart_if_running && cmd.pushed) {',
+      "            const procs = ns.ps('home').filter(p => p.filename === cmd.pushed);",
+      '            for (const proc of procs) {',
+      '              ns.kill(proc.pid);',
+      '              ns.run(cmd.pushed, proc.threads, ...proc.args);',
+      '            }',
+      '          }',
+      '          if (cmd.run) ns.run(cmd.run);',
+      '        }',
+      '      } catch {}',
+      '    }',
+    })
+  end
+
   vim.list_extend(lines, {
+    '    data.last_cmd_id = lastCmdId;',
     '    ns.write(OUTPUT_FILE, JSON.stringify(data), "w");',
     '    await ns.sleep(INTERVAL_MS);',
     '  }',
@@ -1036,9 +1104,12 @@ function M.statusline()
     return n > 0 and ('BB:waiting[' .. n .. ']') or 'BB:waiting'
   end
 
-  local parts = { 'BB:connected' }
-  local info  = _state._info
+  local info = _state._info
   if info then
+    if info.status then
+      return 'BB:connected | ' .. info.status
+    end
+    local parts = { 'BB:connected' }
     if info.ram then
       parts[#parts+1] = string.format('home:%.0f/%.0fGB', info.ram.used, info.ram.max)
     end
@@ -1049,8 +1120,9 @@ function M.statusline()
     if info.reset then
       parts[#parts+1] = 'BN' .. info.reset.bitnode
     end
+    return table.concat(parts, ' | ')
   end
-  return table.concat(parts, ' | ')
+  return 'BB:connected'
 end
 
 return M
