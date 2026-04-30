@@ -65,7 +65,7 @@ local function matches_ignore(rel_path)
   return false
 end
 
-local function do_push_file(filename, content, server)
+local function do_push_file(filename, content, server, skip_cmd)
   _state._push_times[filename] = vim.uv.now()
   rpc('pushFile', { filename = filename, content = content, server = server }, function(result, err)
     if err then
@@ -75,7 +75,7 @@ local function do_push_file(filename, content, server)
         vim.notify('[bitburner] pushed ' .. filename, vim.log.levels.INFO)
       end
       local cfg = _state.config
-      if (cfg.run_on_push or cfg.restart_if_running) and filename ~= cfg.cmd_file then
+      if not skip_cmd and (cfg.run_on_push or cfg.restart_if_running) and filename ~= cfg.cmd_file then
         _state._cmd_id = _state._cmd_id + 1
         local cmd = { id = _state._cmd_id }
         if cfg.restart_if_running then
@@ -95,7 +95,7 @@ local function flush_queue()
   local queue = _state._queue
   _state._queue = {}
   for _, item in pairs(queue) do
-    do_push_file(item.filename, item.content, item.server)
+    do_push_file(item.filename, item.content, item.server, true)
   end
 end
 
@@ -109,7 +109,7 @@ local function push_all()
       if not matches_ignore(rel_path) then
         local ok, lines = pcall(vim.fn.readfile, path)
         if ok then
-          do_push_file('/' .. rel_path, table.concat(lines, '\n'), _state.config.default_server)
+          do_push_file('/' .. rel_path, table.concat(lines, '\n'), _state.config.default_server, true)
         end
       end
     end
@@ -138,7 +138,11 @@ end
 local function write_local_file(rel_path, content)
   local path = _state.config.sync_root .. '/' .. rel_path
   vim.fn.mkdir(vim.fn.fnamemodify(path, ':h'), 'p')
-  local f = assert(io.open(path, 'w'))
+  local f = io.open(path, 'w')
+  if not f then
+    vim.notify('[bitburner] could not write ' .. path, vim.log.levels.ERROR)
+    return
+  end
   f:write(content)
   f:close()
   for _, buf in ipairs(vim.api.nvim_list_bufs()) do
@@ -342,9 +346,17 @@ local function on_connect(conn)
   calculate_ram_for_buf()
 end
 
+local function flush_pending(err)
+  for _, cb in pairs(_state._pending) do
+    pcall(cb, nil, err)
+  end
+  _state._pending = {}
+end
+
 local function on_close(conn)
   if _state.conn == conn then
     _state.conn = nil
+    flush_pending('disconnected')
     stop_pull_timer()
     stop_info_timer()
     vim.notify('[bitburner] game disconnected', vim.log.levels.WARN)
@@ -370,6 +382,7 @@ local function start_server(port)
     _state.server:close()
     _state.server = nil
     _state.conn   = nil
+    flush_pending('server restarted')
   end
   _state.config.port = port
   _state.server = require('websocket').listen(port, {
@@ -460,7 +473,9 @@ local function on_vim_enter()
   if config_path then
     local data = load_project_config(config_path)
     if data then apply_project_config(data) end
-    start_server(_state.config.port)
+    if not _state.server then
+      start_server(_state.config.port)
+    end
   elseif _state.config.auto_detect and detect_project() then
     vim.notify('[bitburner] Bitburner project detected. Run :BitburnerInit to configure.', vim.log.levels.INFO)
   end
@@ -770,6 +785,7 @@ function M.pull_file()
       return
     end
     write_local_file(rel_path, result)
+    _state._last_game['/' .. rel_path] = result
     vim.notify('[bitburner] pulled /' .. rel_path, vim.log.levels.INFO)
   end)
 end
@@ -873,6 +889,7 @@ function M.sync()
     for rel_path, content in pairs(game_files) do
       if not local_files[rel_path] and not matches_ignore(rel_path) then
         write_local_file(rel_path, content)
+        _state._last_game['/' .. rel_path] = content
         pulled = pulled + 1
       end
     end
@@ -1060,12 +1077,12 @@ function M.rm()
       return
     end
     vim.notify('[bitburner] deleted ' .. filename .. ' from game', vim.log.levels.INFO)
+    if choice == 1 then
+      vim.fn.delete(buf_path)
+      _state._ram_cache[buf_path] = nil
+      vim.cmd('bdelete!')
+    end
   end)
-  if choice == 1 then
-    vim.fn.delete(buf_path)
-    _state._ram_cache[buf_path] = nil
-    vim.cmd('bdelete!')
-  end
 end
 
 function M.get_definitions()
