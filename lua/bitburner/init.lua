@@ -53,10 +53,38 @@ local function fetch_definitions(write_jsconfig)
     f:write(result)
     f:close()
 
-    -- Make NS available globally so /** @param {NS} ns */ works without imports.
+    -- Expose all exported types globally so they work without imports.
+    local seen = {}
+    local type_names = {}
+    -- Prepend newline so start-of-line patterns work even on the first line.
+    local src = '\n' .. result
+    for _, pat in ipairs({
+      'export%s+interface%s+(%a[%w_]*)',
+      'export%s+type%s+(%a[%w_]*)',
+      'export%s+enum%s+(%a[%w_]*)',
+      'export%s+declare%s+interface%s+(%a[%w_]*)',
+      'export%s+declare%s+type%s+(%a[%w_]*)',
+      'export%s+declare%s+enum%s+(%a[%w_]*)',
+      '\ninterface%s+(%a[%w_]*)',
+      '\ntype%s+(%a[%w_]*)',
+      '\nenum%s+(%a[%w_]*)',
+    }) do
+      for name in src:gmatch(pat) do
+        if not seen[name] then
+          seen[name] = true
+          table.insert(type_names, name)
+        end
+      end
+    end
+    table.sort(type_names)
     local gf = io.open(dir .. '/bitburner-globals.d.ts', 'w')
     if gf then
-      gf:write('export {};\ndeclare global {\n  type NS = import(\'./NetscriptDefinitions\').NS;\n}\n')
+      local lines = { 'export {};', 'declare global {' }
+      for _, name in ipairs(type_names) do
+        table.insert(lines, string.format("  type %s = import('./NetscriptDefinitions').%s;", name, name))
+      end
+      table.insert(lines, '}')
+      gf:write(table.concat(lines, '\n') .. '\n')
       gf:close()
     end
 
