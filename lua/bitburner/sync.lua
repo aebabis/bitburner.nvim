@@ -4,6 +4,8 @@ local fs      = require('bitburner.fs')
 
 local M = {}
 
+local _ram_seq = {}
+
 function M.do_push_file(filename, content, server, skip_cmd)
   state._push_times[filename] = vim.uv.now()
   rpc_mod.rpc('pushFile', { filename = filename, content = content, server = server }, function(result, err)
@@ -102,8 +104,11 @@ function M.calculate_ram_for_buf()
   if fs.matches_ignore(rel_path) then return end
   local ext = buf_path:match('%.([^.]+)$')
   if not ({ js = true, ts = true, ns = true, script = true })[ext] then return end
+  _ram_seq[buf_path] = (_ram_seq[buf_path] or 0) + 1
+  local seq = _ram_seq[buf_path]
   rpc_mod.rpc('calculateRam', { filename = '/' .. rel_path, server = state.config.default_server },
     function(result, err)
+      if _ram_seq[buf_path] ~= seq then return end
       if not err and result then
         state._ram_cache[buf_path] = string.format('%.2f GB', result)
       else

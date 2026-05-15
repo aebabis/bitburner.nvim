@@ -437,7 +437,18 @@ local function fmt_money(n)
   end
 end
 
-function M.statusline()
+function M.statusline(opts)
+  if type(opts) == 'table' then
+    local left  = opts.left  ~= nil and opts.left  or '%f%m%r'
+    local right = opts.right ~= nil and opts.right or '%l:%c %p%%'
+    return left
+      .. ' %='
+      .. "%{%v:lua.require('bitburner').ram_statusline()%}"
+      .. "%{%v:lua.require('bitburner').statusline()%}"
+      .. ' '
+      .. right
+  end
+
   local buf_path = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(0), ':p')
   if state._ram_cache[buf_path] == nil then return '' end
   if not state.server then
