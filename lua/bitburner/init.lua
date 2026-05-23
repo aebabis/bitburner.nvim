@@ -226,9 +226,9 @@ end
 
 local function setup_ram_autocmds()
   local group = vim.api.nvim_create_augroup('BitburnerRam', { clear = true })
-  vim.api.nvim_create_autocmd({ 'BufEnter', 'BufWritePost' }, {
+  vim.api.nvim_create_autocmd('BufEnter', {
     group    = group,
-    callback = sync.calculate_ram_for_buf,
+    callback = function(args) sync.calculate_ram_for_buf(args.buf) end,
   })
 end
 

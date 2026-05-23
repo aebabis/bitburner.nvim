@@ -15,6 +15,13 @@ function M.do_push_file(filename, content, server, skip_cmd)
       local sync_root = state.config.sync_root
       if sync_root then
         state._file_push_time[sync_root .. filename] = os.time()
+        local local_path = sync_root .. filename
+        for _, b in ipairs(vim.api.nvim_list_bufs()) do
+          if vim.fn.fnamemodify(vim.api.nvim_buf_get_name(b), ':p') == local_path then
+            M.calculate_ram_for_buf(b)
+            break
+          end
+        end
       end
       if state.config.notify_on_push then
         vim.notify('[bitburner] pushed ' .. filename, vim.log.levels.INFO)
@@ -94,11 +101,12 @@ function M.pull_silent()
   end)
 end
 
-function M.calculate_ram_for_buf()
+function M.calculate_ram_for_buf(buf)
+  if type(buf) ~= 'number' then buf = 0 end
   if not state.conn then return end
   local sync_root = state.config.sync_root
   if not sync_root then return end
-  local buf_path = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(0), ':p')
+  local buf_path = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(buf), ':p')
   if not vim.startswith(buf_path, sync_root .. '/') then return end
   local rel_path = buf_path:sub(#sync_root + 2)
   if fs.matches_ignore(rel_path) then return end
