@@ -31,13 +31,18 @@ end
 function M.on_message(_, raw)
   M.dbg('raw: ' .. raw)
   local ok, data = pcall(vim.json.decode, raw)
-  if not ok then return end
+  if not ok then
+    M.dbg('json decode failed: ' .. tostring(data))
+    return
+  end
   local id = data.id
   M.dbg('id=' .. vim.inspect(id) .. ' pending=' .. vim.inspect(vim.tbl_keys(state._pending)))
   if id and state._pending[id] then
     local cb = state._pending[id]
     state._pending[id] = nil
     cb(data.result, data.error)
+  else
+    M.dbg('no pending callback for id=' .. vim.inspect(id))
   end
 end
 
