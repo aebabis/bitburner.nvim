@@ -147,6 +147,7 @@ function M.start_server(port)
   state.config.port = port
   state.server = require('websocket').listen(port, {
     host       = '0.0.0.0',
+    debug      = state.config.debug,
     on_connect = M.on_connect,
     on_message = rpc_mod.on_message,
     on_close   = M.on_close,
