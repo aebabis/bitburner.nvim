@@ -37,8 +37,8 @@ end
 
 local function fetch_definitions(write_jsconfig)
   rpc_mod.rpc('getDefinitionFile', {}, function(result, err)
-    if err or not result then
-      vim.notify('[bitburner] getDefinitionFile failed: ' .. tostring(err), vim.log.levels.WARN)
+    if err or type(result) ~= 'string' then
+      vim.notify('[bitburner] getDefinitionFile failed: ' .. tostring(err or result), vim.log.levels.WARN)
       return
     end
     local root = project_root()
