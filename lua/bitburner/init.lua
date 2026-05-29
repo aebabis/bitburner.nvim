@@ -35,7 +35,7 @@ end
 
 -- TypeScript/JS definitions ------------------------------------------------
 
-local function fetch_definitions(write_jsconfig)
+local function fetch_definitions(write_tsconfig)
   rpc_mod.rpc('getDefinitionFile', {}, function(result, err)
     if err or type(result) ~= 'string' then
       vim.notify('[bitburner] getDefinitionFile failed: ' .. tostring(err or result), vim.log.levels.WARN)
@@ -88,11 +88,11 @@ local function fetch_definitions(write_jsconfig)
       gf:close()
     end
 
-    if write_jsconfig then
-      local jsconfig = root .. '/jsconfig.json'
+    if write_tsconfig then
+      local tsconfig = root .. '/tsconfig.json'
       local config = { compilerOptions = { target = 'ES2022', lib = { 'ES2022' }, checkJs = false } }
 
-      local ef = io.open(jsconfig, 'r')
+      local ef = io.open(tsconfig, 'r')
       if ef then
         local ok, parsed = pcall(vim.json.decode, ef:read('*a'))
         ef:close()
@@ -116,11 +116,11 @@ local function fetch_definitions(write_jsconfig)
       if not has_glob then table.insert(include, '**/*') end
       config.include = include
 
-      local wf = io.open(jsconfig, 'w')
+      local wf = io.open(tsconfig, 'w')
       if wf then
         wf:write(vim.json.encode(config) .. '\n')
         wf:close()
-        vim.notify('[bitburner] updated jsconfig.json — restart your LSP to pick up NS types', vim.log.levels.INFO)
+        vim.notify('[bitburner] updated tsconfig.json — restart your LSP to pick up NS types', vim.log.levels.INFO)
       end
     end
   end)
