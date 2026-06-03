@@ -14,6 +14,7 @@ M.diff        = sync.diff
 M.sync        = sync.sync
 M.rm          = sync.rm
 M.gen_companion = sync.gen_companion
+M.run           = sync.run
 
 -- Project config (.bitburner.json) ----------------------------------------
 

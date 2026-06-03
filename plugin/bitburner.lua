@@ -38,6 +38,10 @@ vim.api.nvim_create_user_command('BitburnerGenCompanion', function(opts)
   require('bitburner').gen_companion(opts.args ~= '' and opts.args or nil)
 end, { nargs = '?' })
 
+vim.api.nvim_create_user_command('BitburnerRun', function(opts)
+  require('bitburner').run(opts.args)
+end, { nargs = '+' })
+
 vim.api.nvim_create_user_command('BitburnerRM', function()
   require('bitburner').rm()
 end, {})

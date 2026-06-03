@@ -391,6 +391,24 @@ function M.rm()
   end)
 end
 
+function M.run(args)
+  if not state.conn then
+    vim.notify('[bitburner] game not connected', vim.log.levels.WARN)
+    return
+  end
+  state._cmd_id = state._cmd_id + 1
+  local cmd = { id = state._cmd_id, run = args }
+  rpc_mod.rpc('pushFile', {
+    filename = state.config.cmd_file,
+    content  = vim.json.encode(cmd),
+    server   = state.config.default_server,
+  }, function(_, err)
+    if err then
+      vim.notify('[bitburner] run failed: ' .. vim.inspect(err), vim.log.levels.ERROR)
+    end
+  end)
+end
+
 -- Companion script ----------------------------------------------------------
 
 local function gen_companion_script(tier)
